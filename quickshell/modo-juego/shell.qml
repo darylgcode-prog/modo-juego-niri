@@ -229,50 +229,6 @@ ShellRoot {
         }
     }
 
-    // ── Trucos del juego elegido (F3) ─────────────────────────────────
-    property var trucos: ({ disponible: false, trucos: [], motivo: "", juego: "" })
-    property string errorTruco: ""
-    property string juegoDeTrucos: ""
-    readonly property bool trucosOcupado: procPonerTruco.running
-
-    function pedirTrucos(id) {
-        if (id !== juegoDeTrucos) {
-            trucos = { disponible: false, trucos: [], motivo: "", juego: "" }
-            errorTruco = ""
-        }
-        juegoDeTrucos = id
-        if (procTrucos.running)
-            return
-        procTrucos.command = ["modo-juego-trucos", "listar", id]
-        procTrucos.running = true
-    }
-
-    function ponerTruco(clave, activo, opcion) {
-        if (procPonerTruco.running || juegoDeTrucos === "")
-            return
-        const orden = ["modo-juego-trucos", "poner", juegoDeTrucos, clave, activo ? "si" : "no"]
-        if (opcion !== "")
-            orden.push("--opcion", opcion)
-        errorTruco = ""
-        procPonerTruco.command = orden
-        procPonerTruco.running = true
-    }
-
-    Process {
-        id: procTrucos
-        stdout: StdioCollector {
-            onStreamFinished: {
-                try { raiz.trucos = JSON.parse(text) } catch (e) { console.warn("modo-juego: trucos ilegibles:", text) }
-            }
-        }
-    }
-    Process {
-        id: procPonerTruco
-        stdout: StdioCollector { onStreamFinished: raiz.errorTruco = text.trim() }
-        // Después de cada cambio se relee, para mostrar lo que quedó de verdad.
-        onExited: raiz.pedirTrucos(raiz.juegoDeTrucos)
-    }
-
     // ── Datos ─────────────────────────────────────────────────────────
     FileView {
         id: archivoCatalogo
@@ -367,17 +323,8 @@ ShellRoot {
             if (ajuste) raiz.ponerAjuste(ajuste.split("=")[0], ajuste.split("=")[1] === "si")
             if (Quickshell.env("MJ_PRUEBA_BUSCAR") === "1") raiz.buscarCaratulas()
             if (Quickshell.env("MJ_PRUEBA_CLAVE_IA")) raiz.guardarClaveIa(Quickshell.env("MJ_PRUEBA_CLAVE_IA"))
-            // «id|clave»: pide los trucos de ese juego y enciende uno.
-            const truco = (Quickshell.env("MJ_PRUEBA_TRUCO") || "").split("|")
-            if (truco.length === 2) {
-                raiz.pedirTrucos(truco[0])
-                pruebaTruco.clave = truco[1]
-                pruebaTruco.start()
-            }
         }
     }
-
-    Timer { id: pruebaTruco; property string clave: ""; interval: 1200; onTriggered: raiz.ponerTruco(clave, true, "") }
 
     Variants {
         model: Quickshell.screens
@@ -396,9 +343,7 @@ ShellRoot {
             WlrLayershell.namespace: "modo-juego"
             WlrLayershell.layer: WlrLayer.Overlay
             // La salida no pide nada: no toma el teclado.
-            // (En las pruebas no se toma, salvo que la prueba sea justo del teclado.)
-            WlrLayershell.keyboardFocus: principal && raiz.modo !== "salida"
-                                         && (raiz.prueba === 0 || Quickshell.env("MJ_PRUEBA_TECLADO") === "1")
+            WlrLayershell.keyboardFocus: principal && raiz.prueba === 0 && raiz.modo !== "salida"
                                          ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
             Escena {

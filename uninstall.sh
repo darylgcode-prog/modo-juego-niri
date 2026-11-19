@@ -19,7 +19,9 @@ if [[ -f $ESTADO/modo-juego/estado ]] && command -v modo-juego >/dev/null; then
   MODO_JUEGO_SUELTO=1 modo-juego desactivar || true
 fi
 
-for f in modo-juego modo-juego-catalogo modo-juego-caratulas modo-juego-mando modo-juego-asistente modo-juego-trucos modo-juego-entrenador; do
+# (Los dos últimos son de versiones anteriores; se quitan si quedaron.)
+for f in modo-juego modo-juego-catalogo modo-juego-caratulas modo-juego-mando modo-juego-asistente \
+  modo-juego-trucos modo-juego-entrenador; do
   rm -f "$BIN/$f"
 done
 rm -rf "${CONFIG:?}/quickshell/modo-juego" "${CONFIG:?}/quickshell/modo-juego-companero"

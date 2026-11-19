@@ -105,10 +105,6 @@ ASISTENTE_CAPTURA=si
 # "si": al cerrar un juego o un emulador abierto desde el lanzador, el
 # lanzador vuelve a aparecer.
 VOLVER_AL_LANZADOR=si
-# Entrenador: el juego se lanza de modo que el compañero pueda buscar y
-# cambiar valores en su memoria (trucos en vivo). Para partidas sin
-# conexión; con un anticheat corriendo no hace nada.
-ENTRENADOR=si
 
 # ──────────────────────────── Preparación ────────────────────────────
 
@@ -136,7 +132,6 @@ ARCHIVO_GUIAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/guias.conf"
 COMPANERO_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/modo-juego-companero"
 NAVEGADOR_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/navegador"
 PUERTO_GUIAS=9333
-ENCHUFE_ENTRENADOR="${XDG_RUNTIME_DIR:-/tmp}/modo-juego-entrenador.sock"
 
 decir() {
   printf '%s\n' "$*"
@@ -364,7 +359,7 @@ companero_cerrar() {
 # dibuja encima del juego y las guías se ven como imágenes que entrega un
 # navegador sin ventana. Devuelve 1 si está apagado en Ajustes.
 companero_abrir() {
-  local id=$1 nombre=$2 enchufe=${3:-} del_juego otra guias caratula u navegador superpuesto=no pantalla
+  local id=$1 nombre=$2 del_juego otra guias caratula u navegador superpuesto=no pantalla
   local -a urls=()
   [[ $COMPANERO = si && -f $COMPANERO_DIR/shell.qml ]] || return 1
   del_juego=$(niri msg -j focused-output 2>/dev/null | jq -r '.name // empty')
@@ -425,7 +420,7 @@ companero_abrir() {
     MJC_NOTAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/notas/$id.md" \
     MJC_HISTORIAL="$DIR/historial-asistente.json" MJC_MODELO="$ASISTENTE_MODELO" \
     MJC_CAPTURA="$ASISTENTE_CAPTURA" MJC_SUPERPUESTO="$superpuesto" MJC_OPACIDAD="$OPACIDAD_COMPANERO" \
-    MJC_ENTRENADOR="$enchufe" qs -p "$COMPANERO_DIR"
+    qs -p "$COMPANERO_DIR"
   return 0
 }
 
@@ -472,7 +467,7 @@ esperar_steam() {
 
 # Lanza una entrada del catálogo, espera a que termine y anota la partida.
 jugar() {
-  local fila=${1:-} id=${2:-} cmd inicio nombre sistema enchufe='' con_companero=0
+  local fila=${1:-} id=${2:-} cmd inicio nombre con_companero=0
   cmd=$(jq -r --arg f "$fila" --arg i "$id" '.[$f][]? | select(.id == $i) | .cmd' "$CATALOGO" 2>/dev/null | head -1)
   nombre=$(jq -r --arg f "$fila" --arg i "$id" '.[$f][]? | select(.id == $i) | .nombre' "$CATALOGO" 2>/dev/null | head -1)
   if [[ -z $cmd ]]; then
@@ -482,27 +477,15 @@ jugar() {
   if [[ $fila = juegos && $HUD = si && -f $ARCHIVO_HUD ]] && command -v mangohud >/dev/null; then
     export MANGOHUD=1 MANGOHUD_CONFIGFILE="$ARCHIVO_HUD"
   fi
-  sistema=$(jq -r --arg f "$fila" --arg i "$id" '.[$f][]? | select(.id == $i) | .sistema // ""' "$CATALOGO" 2>/dev/null | head -1)
-  # El entrenador necesita ser quien lanza el juego (solo así puede leerle
-  # la memoria), por eso no sirve con los que Steam abre por su cuenta.
-  if [[ $ENTRENADOR = si && $fila = juegos && ! $cmd =~ steam://rungameid ]] && command -v modo-juego-entrenador >/dev/null; then
-    enchufe=$ENCHUFE_ENTRENADOR
-  fi
   # El compañero solo acompaña a los juegos, no a lanzadores ni emuladores sueltos.
-  if [[ $fila = juegos ]] && companero_abrir "$id" "$nombre" "$enchufe"; then
+  if [[ $fila = juegos ]] && companero_abrir "$id" "$nombre"; then
     con_companero=1
   fi
-  # Sin compañero no hay dónde usar el entrenador: el juego va directo.
-  ((con_companero)) || enchufe=''
   inicio=$(date +%s)
   # Se anota al partir (así «lo último que jugaste» vale aunque esto se
   # corte) y otra vez al terminar, con lo que duró.
   jq -cn --arg id "$id" --arg f "$fila" --argjson t "$inicio" '{id: $id, fila: $f, inicio: $t, segundos: 0}' >>"$PARTIDAS"
-  if [[ -n $enchufe ]]; then
-    modo-juego-entrenador --enchufe "$enchufe" --sistema "$sistema" -- sh -c "$cmd"
-  else
-    sh -c "$cmd"
-  fi
+  sh -c "$cmd"
   [[ $cmd =~ steam://rungameid/([0-9]+) ]] && esperar_steam "${BASH_REMATCH[1]}"
   ((con_companero)) && companero_cerrar
   jq -cn --arg id "$id" --arg f "$fila" --argjson t "$inicio" --argjson s "$(($(date +%s) - inicio))" \
@@ -560,7 +543,7 @@ guardar_clave() {
 # con que cada uno viaja en el JSON.
 AJUSTABLES=(SONIDO:sonido ANIMACION:animacion CARATULAS_AUTO:caratulasAuto TECLADO:teclado
   NO_MOLESTAR:noMolestar APAGAR_OTRAS_PANTALLAS:apagarPantallas HUD:hud
-  COMPANERO:companero ASISTENTE_CAPTURA:captura VOLVER_AL_LANZADOR:volver ENTRENADOR:entrenador)
+  COMPANERO:companero ASISTENTE_CAPTURA:captura VOLVER_AL_LANZADOR:volver)
 
 poner_ajuste() {
   local nombre=${1:-} valor=${2:-} par nombres='ASISTENTE_MODELO' ok=0
