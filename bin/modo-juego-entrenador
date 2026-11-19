@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Entrenador del modo juego: busca valores en la memoria del juego que
+está corriendo, los cambia y los congela. Para partidas sin conexión.
+
+Se usa lanzando el juego a través de él:
+
+  modo-juego-entrenador --enchufe RUTA [--sistema "Wii U"] -- comando del juego…
+
+El juego corre como hijo de este programa. Eso es lo que permite leerle la
+memoria: en Linux un proceso solo puede mirar la memoria de sus
+descendientes. Por lo mismo no sirve con juegos que abre Steam por su cuenta.
+Cuando el juego termina, este programa termina con el mismo resultado.
+
+Mientras tanto atiende órdenes en RUTA (un enchufe local, una orden en JSON
+por línea); las manda el panel del compañero:
+
+  {"op": "estado"}                                   qué proceso mira y cuántos candidatos quedan
+  {"op": "buscar", "valor": "320", "tipo": "i32"}    primera búsqueda de un valor
+  {"op": "filtrar", "modo": "igual", "valor": "315"} deja los que ahora valen eso
+  {"op": "filtrar", "modo": "cambio"}                o: sin_cambio, subio, bajo
+  {"op": "lista"}                                    los primeros candidatos, con su valor de ahora
+  {"op": "poner", "dir": 140737…, "valor": "999"}    escribe un valor
+  {"op": "congelar", "dir": 140737…, "valor": "999", "si": true}   lo reescribe sin parar
+  {"op": "poner_todos", "valor": "999"}              lo mismo en todos los candidatos que quedan
+  {"op": "congelar_todos", "valor": "999", "si": true}   (solo cuando quedan pocos)
+  {"op": "reiniciar"}                                olvida la búsqueda y lo congelado
+  {"op": "proceso", "pid": 1234}                     mirar otro proceso del juego
+
+Tipos: i8 i16 i32 i64 (enteros), f32 f64 (decimales). Las consolas con
+procesador al revés (Wii U, GameCube, Wii, PlayStation 3) guardan los números
+con los bytes invertidos; con --sistema se elige solo.
+
+Si en el juego hay un anticheat corriendo, no busca ni escribe nada.
+"""
+import ctypes
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+try:
+    import numpy as np
+except ImportError:          # sin numpy el juego igual se lanza; solo no hay entrenador
+    np = None
+
+TIPOS = {"i8": "i1", "i16": "i2", "i32": "i4", "i64": "i8", "f32": "f4", "f64": "f8"}
+AL_REVES = {"Wii U", "GameCube", "Wii", "PlayStation 3"}
+ANTICHEATS = {
+    "easyanticheat": "EasyAntiCheat", "eac_launcher": "EasyAntiCheat", "start_protected_game": "EasyAntiCheat",
+    "battleye": "BattlEye", "beservice": "BattlEye", "vgc.exe": "Vanguard", "vanguard": "Vanguard",
+    "xigncode": "XIGNCODE", "gameguard": "GameGuard", "nprotect": "GameGuard", "equ8": "EQU8",
+}
+TROZO = 32 * 1024 * 1024
+MAX_CANDIDATOS = 30_000_000
+MAX_REGION = 8 * 1024 ** 3
+
+
+# ── Procesos ─────────────────────────────────────────────────────────
+
+def descendientes(raiz):
+    """Todos los procesos que cuelgan de `raiz` (sin incluirlo)."""
+    padres = {}
+    for nombre in os.listdir("/proc"):
+        if not nombre.isdigit():
+            continue
+        try:
+            with open(f"/proc/{nombre}/stat", "rb") as f:
+                dato = f.read().decode("utf-8", "replace")
+            # El nombre va entre paréntesis y puede traer espacios: se corta por el último «)».
+            padres[int(nombre)] = int(dato[dato.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    hijos = {}
+    for pid, padre in padres.items():
+        hijos.setdefault(padre, []).append(pid)
+    encontrados, cola = [], [raiz]
+    while cola:
+        for hijo in hijos.get(cola.pop(), []):
+            encontrados.append(hijo)
+            cola.append(hijo)
+    return encontrados
+
+
+def describir(pid):
+    """Nombre legible y memoria (MB) de un proceso."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            orden = f.read().split(b"\0")
+        with open(f"/proc/{pid}/comm") as f:
+            corto = f.read().strip()
+        with open(f"/proc/{pid}/statm") as f:
+            paginas = int(f.read().split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    nombre = corto
+    if orden and orden[0]:
+        primero = orden[0].decode("utf-8", "replace")
+        # Los juegos de Windows aparecen con su ruta de Windows: basta el .exe.
+        nombre = re.split(r"[\\/]", primero)[-1] or corto
+    return {"pid": pid, "nombre": nombre, "mb": paginas * os.sysconf("SC_PAGE_SIZE") // (1024 * 1024),
+            "orden": b" ".join(orden).decode("utf-8", "replace").lower() + " " + corto.lower()}
+
+
+def regiones(pid):
+    """Trozos de memoria donde puede vivir un valor del juego: (inicio, fin)."""
+    lista = []
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            for linea in f:
+                partes = linea.split(None, 5)
+                if len(partes) < 5 or not partes[1].startswith("rw"):
+                    continue
+                ruta = partes[5].strip() if len(partes) > 5 else ""
+                # La memoria de video y otros dispositivos no se toca: leerla puede colgar el juego.
+                if ruta.startswith("/dev/") and not ruta.startswith("/dev/shm/"):
+                    continue
+                if ruta in ("[vvar]", "[vdso]", "[vsyscall]", "[vvar_vclock]"):
+                    continue
+                inicio, fin = (int(x, 16) for x in partes[0].split("-"))
+                if 0 < fin - inicio <= MAX_REGION:
+                    lista.append((inicio, fin))
+    except OSError:
+        pass
+    return lista
+
+
+# ── El entrenador ────────────────────────────────────────────────────
+
+class Entrenador:
+    def __init__(self, al_reves):
+        self.al_reves = al_reves
+        self.candado = threading.Lock()
+        self.pid = 0                # proceso que se mira
+        self.elegido_a_mano = False
+        self.fd = -1
+        self.tipo = "i32"
+        self.dirs = None            # direcciones candidatas (ordenadas)
+        self.valores = None         # lo que valían la última vez
+        self.congelados = {}        # dirección → (bytes, texto)
+        self.buscando = False
+        threading.Thread(target=self._mantener_congelados, daemon=True).start()
+
+    # ·· a qué proceso se mira ··
+    def procesos(self):
+        lista = [d for d in (describir(p) for p in descendientes(os.getpid())) if d]
+        lista.sort(key=lambda d: -d["mb"])
+        return lista
+
+    def anticheat(self, lista):
+        for d in lista:
+            for marca, nombre in ANTICHEATS.items():
+                if marca in d["orden"]:
+                    return nombre
+        return ""
+
+    def _apuntar(self, lista):
+        """Deja abierto el proceso a mirar: el que más memoria usa, salvo que se eligiera otro."""
+        vivos = {d["pid"] for d in lista}
+        if self.pid in vivos and (self.elegido_a_mano or self.dirs is not None):
+            return
+        nuevo = lista[0]["pid"] if lista else 0
+        if nuevo != self.pid:
+            self._abrir(nuevo)
+
+    def _abrir(self, pid):
+        if self.fd >= 0:
+            os.close(self.fd)
+        self.fd, self.pid = -1, pid
+        self.dirs = self.valores = None
+        self.congelados.clear()
+        if not pid:
+            return
+        for modo in (os.O_RDWR, os.O_RDONLY):
+            try:
+                self.fd = os.open(f"/proc/{pid}/mem", modo)
+                return
+            except OSError:
+                continue
+
+    def _dtype(self):
+        return np.dtype((">" if self.al_reves else "<") + TIPOS[self.tipo])
+
+    def _numero(self, texto):
+        texto = str(texto).strip().replace(",", ".")
+        return float(texto) if self.tipo.startswith("f") else int(float(texto))
+
+    def _margen(self, texto):
+        """Con decimales se busca «más o menos»: los juegos muestran el número redondeado."""
+        texto = str(texto).strip().replace(",", ".")
+        decimales = len(texto.split(".")[1]) if "." in texto else 0
+        return 0.5 * 10 ** (-decimales)
+
+    def _iguales(self, arr, texto):
+        if self.tipo.startswith("f"):
+            v, m = self._numero(texto), self._margen(texto)
+            return (arr >= v - m) & (arr < v + m)
+        return arr == self._numero(texto)
+
+    def _leer(self, inicio, largo):
+        """Bytes de la memoria del juego, o None si ese trozo no se puede leer."""
+        try:
+            return os.pread(self.fd, largo, inicio)
+        except OSError:
+            return None
+
+    # ·· buscar ··
+    def buscar(self, texto, tipo):
+        if tipo not in TIPOS:
+            return {"error": "No conozco ese tipo de número."}
+        self.tipo = tipo
+        dtype = self._dtype()
+        paso = dtype.itemsize
+        try:
+            self._numero(texto)
+        except ValueError:
+            return {"error": "Eso no es un número."}
+        partes, total, cortado, inicio_reloj = [], 0, False, time.time()
+        for inicio, fin in regiones(self.pid):
+            pos = inicio
+            while pos < fin and not cortado:
+                largo = min(TROZO, fin - pos)
+                datos = self._leer(pos, largo)
+                if datos is None and largo > 4096:
+                    # Un trozo con huecos falla entero: se reintenta página por página.
+                    for sub in range(pos, pos + largo, 1024 * 1024):
+                        chico = self._leer(sub, min(1024 * 1024, pos + largo - sub))
+                        if chico:
+                            total, cortado = self._juntar(partes, chico, sub, dtype, paso, texto, total)
+                elif datos:
+                    total, cortado = self._juntar(partes, datos, pos, dtype, paso, texto, total)
+                pos += largo
+            if cortado:
+                break
+        self.dirs = np.concatenate(partes) if partes else np.zeros(0, dtype=np.uint64)
+        self.valores = self._valores_de(self.dirs)[0]
+        self.congelados.clear()
+        respuesta = {"candidatos": int(self.dirs.size), "segundos": round(time.time() - inicio_reloj, 1)}
+        if cortado:
+            respuesta["aviso"] = "Hay demasiadas coincidencias: me quedé con una parte. Busca un número menos común."
+        return respuesta
+
+    def _juntar(self, partes, datos, base, dtype, paso, texto, total):
+        util = len(datos) - len(datos) % paso
+        arr = np.frombuffer(datos, dtype=dtype, count=util // paso)
+        indices = np.flatnonzero(self._iguales(arr, texto))
+        if indices.size:
+            partes.append(base + indices.astype(np.uint64) * np.uint64(paso))
+            total += indices.size
+        return total, total > MAX_CANDIDATOS
+
+    def _valores_de(self, dirs):
+        """Valor actual en cada dirección. Devuelve (valores, cuáles se pudieron leer)."""
+        dtype = self._dtype()
+        paso = dtype.itemsize
+        valores = np.zeros(dirs.size, dtype=dtype)
+        leidos = np.zeros(dirs.size, dtype=bool)
+        i = 0
+        while i < dirs.size:
+            base = int(dirs[i])
+            # Todas las candidatas que caen en la misma ventana se leen de una vez.
+            j = int(np.searchsorted(dirs, np.uint64(base + TROZO), side="left"))
+            largo = int(dirs[j - 1]) - base + paso
+            datos = self._leer(base, largo)
+            if datos is not None and len(datos) == largo:
+                desplazamientos = (dirs[i:j] - np.uint64(base)).astype(np.int64)
+                if np.all(desplazamientos % paso == 0):
+                    arr = np.frombuffer(datos, dtype=dtype, count=largo // paso)
+                    valores[i:j] = arr[desplazamientos // paso]
+                    leidos[i:j] = True
+                else:
+                    for k in range(i, j):
+                        d = int(desplazamientos[k - i])
+                        valores[k] = np.frombuffer(datos[d:d + paso], dtype=dtype)[0]
+                    leidos[i:j] = True
+            elif j - i > 1:
+                # La ventana tiene un hueco: se lee de a una.
+                for k in range(i, j):
+                    uno = self._leer(int(dirs[k]), paso)
+                    if uno is not None and len(uno) == paso:
+                        valores[k] = np.frombuffer(uno, dtype=dtype)[0]
+                        leidos[k] = True
+            i = j
+        return valores, leidos
+
+    def filtrar(self, modo, texto):
+        if self.dirs is None:
+            return {"error": "Primero hay que buscar un valor."}
+        ahora, leidos = self._valores_de(self.dirs)
+        if modo == "igual":
+            try:
+                queda = self._iguales(ahora, texto)
+            except ValueError:
+                return {"error": "Eso no es un número."}
+        elif modo == "cambio":
+            queda = ahora != self.valores
+        elif modo == "sin_cambio":
+            queda = ahora == self.valores
+        elif modo == "subio":
+            queda = ahora > self.valores
+        elif modo == "bajo":
+            queda = ahora < self.valores
+        else:
+            return {"error": "No conozco ese filtro."}
+        queda &= leidos
+        self.dirs, self.valores = self.dirs[queda], ahora[queda]
+        vivas = set(int(d) for d in self.dirs[:5000]) if self.dirs.size <= 5000 else None
+        if vivas is not None:
+            for d in [d for d in self.congelados if d not in vivas]:
+                del self.congelados[d]
+        return {"candidatos": int(self.dirs.size)}
+
+    def lista(self, cuantos=40):
+        if self.dirs is None:
+            return {"candidatos": 0, "lista": []}
+        primeras = self.dirs[:cuantos]
+        valores, leidos = self._valores_de(primeras)
+        filas = []
+        for d, v, ok in zip(primeras, valores, leidos):
+            d = int(d)
+            filas.append({"dir": d, "valor": self._texto(v) if ok else "?",
+                          "congelado": d in self.congelados,
+                          "fijo": self.congelados[d][1] if d in self.congelados else ""})
+        return {"candidatos": int(self.dirs.size), "lista": filas}
+
+    def _texto(self, v):
+        if self.tipo.startswith("f"):
+            return f"{float(v):.4g}"
+        return str(int(v))
+
+    def _bytes(self, texto):
+        return np.array([self._numero(texto)], dtype=self._dtype()).tobytes()
+
+    def poner(self, direccion, texto):
+        try:
+            datos = self._bytes(texto)
+            os.pwrite(self.fd, datos, int(direccion))
+        except (ValueError, OverflowError):
+            return {"error": "Ese número no cabe en este tipo de valor."}
+        except OSError:
+            return {"error": "No pude escribir ahí (el juego movió o protegió ese dato)."}
+        if int(direccion) in self.congelados:
+            self.congelados[int(direccion)] = (datos, str(texto))
+        return {"ok": True}
+
+    def congelar(self, direccion, texto, si):
+        direccion = int(direccion)
+        if not si:
+            self.congelados.pop(direccion, None)
+            return {"ok": True}
+        try:
+            self.congelados[direccion] = (self._bytes(texto), str(texto))
+        except (ValueError, OverflowError):
+            return {"error": "Ese número no cabe en este tipo de valor."}
+        return {"ok": True}
+
+    # Cuando quedan varios candidatos, lo normal es que uno sea el valor de
+    # verdad y los demás copias: escribir en todos es la forma rápida.
+    MAX_TODOS = 300
+
+    def poner_todos(self, texto):
+        if self.dirs is None or self.dirs.size == 0:
+            return {"error": "No hay candidatos."}
+        if self.dirs.size > self.MAX_TODOS:
+            return {"error": f"Quedan demasiados ({self.dirs.size}): sigue filtrando hasta tener menos de {self.MAX_TODOS}."}
+        escritos = sum(1 for d in self.dirs if "ok" in self.poner(int(d), texto))
+        return {"ok": True, "escritos": escritos}
+
+    def congelar_todos(self, texto, si):
+        if self.dirs is None or self.dirs.size == 0:
+            return {"error": "No hay candidatos."}
+        if self.dirs.size > self.MAX_TODOS:
+            return {"error": f"Quedan demasiados ({self.dirs.size}): sigue filtrando hasta tener menos de {self.MAX_TODOS}."}
+        for d in self.dirs:
+            respuesta = self.congelar(int(d), texto, si)
+            if "error" in respuesta:
+                return respuesta
+        return {"ok": True}
+
+    def _mantener_congelados(self):
+        while True:
+            time.sleep(0.08)
+            for direccion, (datos, _) in list(self.congelados.items()):
+                try:
+                    os.pwrite(self.fd, datos, direccion)
+                except OSError:
+                    self.congelados.pop(direccion, None)
+
+    # ·· órdenes ··
+    def atender(self, orden):
+        if np is None:
+            return {"error": "Falta el paquete numpy de Python: sin él no hay entrenador."}
+        op = orden.get("op")
+        with self.candado:
+            lista = self.procesos()
+            guardia = self.anticheat(lista)
+            self._apuntar(lista)
+            if op == "estado":
+                actual = next((d for d in lista if d["pid"] == self.pid), None)
+                return {
+                    "procesos": [{k: d[k] for k in ("pid", "nombre", "mb")} for d in lista[:5]],
+                    "pid": self.pid, "nombre": actual["nombre"] if actual else "",
+                    "legible": self.fd >= 0, "anticheat": guardia, "tipo": self.tipo,
+                    "al_reves": self.al_reves, "buscado": self.dirs is not None,
+                    "candidatos": int(self.dirs.size) if self.dirs is not None else 0,
+                    "congelados": len(self.congelados),
+                }
+            if guardia:
+                return {"error": f"Hay un anticheat corriendo ({guardia}). Con él activo el entrenador no hace nada: "
+                                 "tocar la memoria así termina en baneo."}
+            if op == "proceso":
+                if int(orden.get("pid", 0)) in {d["pid"] for d in lista}:
+                    self.elegido_a_mano = True
+                    self._abrir(int(orden["pid"]))
+                    return {"ok": True}
+                return {"error": "Ese proceso ya no está."}
+            if op == "reiniciar":
+                self.dirs = self.valores = None
+                self.congelados.clear()
+                return {"ok": True}
+            if self.fd < 0:
+                return {"error": "No puedo leer la memoria del juego todavía (¿ya partió?)."}
+            if op == "buscar":
+                return self.buscar(orden.get("valor", ""), orden.get("tipo", "i32"))
+            if op == "filtrar":
+                return self.filtrar(orden.get("modo", ""), orden.get("valor", ""))
+            if op == "lista":
+                return self.lista()
+            if op == "poner":
+                return self.poner(orden.get("dir", 0), orden.get("valor", ""))
+            if op == "congelar":
+                return self.congelar(orden.get("dir", 0), orden.get("valor", ""), bool(orden.get("si")))
+            if op == "poner_todos":
+                return self.poner_todos(orden.get("valor", ""))
+            if op == "congelar_todos":
+                return self.congelar_todos(orden.get("valor", ""), bool(orden.get("si")))
+        return {"error": "No conozco esa orden."}
+
+
+def servir(ruta, entrenador):
+    try:
+        os.unlink(ruta)
+    except OSError:
+        pass
+    servidor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    antes = os.umask(0o177)             # solo el dueño puede hablarle
+    try:
+        servidor.bind(ruta)
+    finally:
+        os.umask(antes)
+    servidor.listen(4)
+
+    def cliente(conexion):
+        with conexion, conexion.makefile("rwb") as canal:
+            for linea in canal:
+                try:
+                    orden = json.loads(linea)
+                    respuesta = entrenador.atender(orden)
+                    respuesta["op"] = orden.get("op", "")
+                except Exception as error:       # una orden mala no debe tumbar el entrenador ni el juego
+                    respuesta = {"error": f"Falló la orden: {error}"}
+                try:
+                    canal.write((json.dumps(respuesta, ensure_ascii=False) + "\n").encode())
+                    canal.flush()
+                except OSError:
+                    return
+
+    def aceptar():
+        while True:
+            try:
+                conexion, _ = servidor.accept()
+            except OSError:
+                return
+            threading.Thread(target=cliente, args=(conexion,), daemon=True).start()
+
+    threading.Thread(target=aceptar, daemon=True).start()
+
+
+def main():
+    args = sys.argv[1:]
+    if "--" not in args:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    corte = args.index("--")
+    propias, orden = args[:corte], args[corte + 1:]
+    if not orden:
+        print("Falta el comando del juego después de «--».", file=sys.stderr)
+        return 2
+    enchufe = propias[propias.index("--enchufe") + 1] if "--enchufe" in propias else ""
+    sistema = propias[propias.index("--sistema") + 1] if "--sistema" in propias else ""
+
+    # Los procesos que queden huérfanos dentro del juego pasan a colgar de
+    # aquí: así siguen siendo descendientes y se les puede leer la memoria.
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)      # PR_SET_CHILD_SUBREAPER
+    except Exception:
+        pass
+
+    try:
+        juego = subprocess.Popen(orden)
+    except OSError as error:
+        print(f"modo-juego-entrenador: no pude lanzar el juego: {error}", file=sys.stderr)
+        return 127
+    if enchufe:
+        try:
+            servir(enchufe, Entrenador(sistema in AL_REVES))
+        except Exception as error:
+            print(f"modo-juego-entrenador: no pude abrir el enchufe: {error}", file=sys.stderr)
+
+    resultado = 0
+    while True:
+        try:
+            pid, estado = os.wait()
+        except ChildProcessError:
+            break                       # ya no queda ningún descendiente
+        except KeyboardInterrupt:
+            continue
+        if pid == juego.pid:
+            resultado = os.waitstatus_to_exitcode(estado)
+    if enchufe:
+        try:
+            os.unlink(enchufe)
+        except OSError:
+            pass
+    return resultado if resultado >= 0 else 128 - resultado
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -90,6 +90,7 @@ pw-play|recomendado|los sonidos|pipewire-audio|pipewire-bin|pipewire-utils
 notify-send|recomendado|avisos cuando no hay animación|libnotify|libnotify-bin|libnotify
 grim|recomendado|la captura que acompaña las preguntas al asistente|grim|grim|grim
 py:evdev|recomendado|manejar el lanzador con mando|python-evdev|python3-evdev|python3-evdev
+py:numpy|recomendado|el entrenador (trucos en vivo)|python-numpy|python3-numpy|python3-numpy
 mangohud|recomendado|contador de FPS en los juegos|mangohud|mangohud|mangohud
 fuente:Inter|recomendado|la letra con que está diseñado|inter-font|fonts-inter|rsms-inter-fonts
 powerprofilesctl|aparte|perfil de rendimiento al jugar (choca con TLP)|power-profiles-daemon|power-profiles-daemon|power-profiles-daemon

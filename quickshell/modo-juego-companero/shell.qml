@@ -20,6 +20,7 @@ import Quickshell.Wayland
 //   MJC_HISTORIAL       archivo con las preguntas de esta sesión
 //   MJC_MODELO          opus | sonnet | haiku
 //   MJC_CAPTURA         «si» = las preguntas llevan una captura del juego
+//   MJC_ENTRENADOR      enchufe del entrenador (vacío = este juego no lo tiene)
 //   MJC_SUPERPUESTO     «si» = una sola pantalla: va encima del juego, translúcido,
 //                       oculto hasta que se pide, con la guía transmitida en vivo
 //                       al lado (se usa con el ratón)
@@ -372,6 +373,95 @@ ShellRoot {
         }
     }
 
+    // ── Entrenador: buscar y cambiar valores del juego en vivo ────────
+    // El motor es «modo-juego-entrenador», que es quien lanzó el juego. Aquí
+    // solo se le mandan órdenes por su enchufe y se muestra lo que responde.
+    readonly property string enchufeEntrenador: Quickshell.env("MJC_ENTRENADOR") || ""
+    readonly property bool hayEntrenador: enchufeEntrenador !== ""
+    property int pestana: 0                 // 0 = asistente, 1 = entrenador
+    property var estadoEntrenador: ({})
+    property var candidatos: []
+    property int cuantos: -1                // -1 = todavía no se busca nada
+    property string avisoEntrenador: ""
+    property bool entrenando: false         // esperando una respuesta
+    property string tipoValor: "i32"
+
+    Socket {
+        id: enchufe
+        path: raiz.enchufeEntrenador
+        connected: false
+        parser: SplitParser { onRead: linea => raiz.respuestaEntrenador(linea) }
+    }
+
+    function ordenar(orden, callada) {
+        if (!enchufe.connected) {
+            if (!callada)
+                avisoEntrenador = "El juego todavía no está listo. Espera a que parta."
+            return
+        }
+        if (!callada) {
+            entrenando = true
+            avisoEntrenador = ""
+        }
+        enchufe.write(JSON.stringify(orden) + "\n")
+        enchufe.flush()
+    }
+
+    function respuestaEntrenador(linea) {
+        let r
+        try { r = JSON.parse(linea) } catch (e) { return }
+        if (r.op === "estado") {
+            estadoEntrenador = r
+            return
+        }
+        if (prueba > 0 && Quickshell.env("MJC_PRUEBA_ENTRENADOR"))
+            console.warn("ENTRENADOR " + r.op + ": " + (r.error || ("candidatos=" + (r.candidatos !== undefined ? r.candidatos : "-")
+                         + (r.lista ? " valores=" + r.lista.slice(0, 4).map(x => x.valor + (x.congelado ? "*" : "")).join(",") : ""))))
+        const refresco = r.op === "lista"
+        if (!refresco)
+            entrenando = false
+        if (r.error) {
+            avisoEntrenador = r.error
+            return
+        }
+        if (r.aviso)
+            avisoEntrenador = r.aviso
+        if (r.op === "buscar" || r.op === "filtrar") {
+            cuantos = r.candidatos
+            candidatos = []
+            if (cuantos > 0 && cuantos <= 300)
+                ordenar({ op: "lista" }, true)
+            if (cuantos === 0)
+                avisoEntrenador = "No quedó ninguno. Empieza una búsqueda nueva; si era un número con decimales, prueba el otro tipo."
+        } else if (refresco) {
+            candidatos = r.lista
+            cuantos = r.candidatos
+        } else if (r.op === "reiniciar") {
+            cuantos = -1
+            candidatos = []
+        } else {
+            ordenar({ op: "lista" }, true)      // después de escribir o congelar, se muestra cómo quedó
+        }
+    }
+
+    // Mientras la pestaña está a la vista: conectar cuando el juego ya partió,
+    // y refrescar el estado y los valores que se están mirando.
+    Timer {
+        interval: 1200
+        repeat: true
+        running: raiz.hayEntrenador && raiz.pestana === 1 && raiz.aLaVista
+        triggeredOnStart: true
+        onTriggered: {
+            if (!enchufe.connected) {
+                enchufe.connected = true
+                return
+            }
+            raiz.ordenar({ op: "estado" }, true)
+            if (!raiz.entrenando && raiz.cuantos > 0 && raiz.cuantos <= 300)
+                raiz.ordenar({ op: "lista" }, true)
+        }
+    }
+
     // ── Atajos globales: llegan por aquí sin quitarle el foco al juego ─
     IpcHandler {
         target: "companero"
@@ -422,6 +512,27 @@ ShellRoot {
             raiz.raton("mouseMoved", 120 + (paso * 9) % 700, 140 + (paso * 5) % 800, false)
             if (paso % 25 === 0)
                 raiz.rueda(400, 500, 0, paso % 50 === 0 ? 240 : -240)
+        }
+    }
+    // Solo en modo prueba: recorre el entrenador sin teclado. Los pasos van
+    // en MJC_PRUEBA_ENTRENADOR como «ms:orden» separados por «;», donde la
+    // orden es el JSON que se le manda al motor.
+    Timer {
+        property var pasos: (Quickshell.env("MJC_PRUEBA_ENTRENADOR") || "").split(";").filter(x => x !== "")
+        property int i: 0
+        property real inicio: Date.now()
+        interval: 100
+        repeat: true
+        running: raiz.prueba > 0 && pasos.length > 0
+        onTriggered: {
+            raiz.pestana = 1
+            if (i >= pasos.length)
+                return
+            const corte = pasos[i].indexOf(":")
+            if (Date.now() - inicio < parseInt(pasos[i].slice(0, corte)))
+                return
+            raiz.ordenar(JSON.parse(pasos[i].slice(corte + 1)))
+            i++
         }
     }
     // Solo en modo prueba: hace una pregunta sin teclado.
@@ -763,8 +874,10 @@ ShellRoot {
                 Rectangle { width: parent.width; height: 1; color: "#22ffffff" }
 
                 // ── Notas ──
-                Titulo { text: "TUS NOTAS DE ESTE JUEGO" }
+                // (Con la pestaña del entrenador abierta, las notas le ceden el lugar.)
+                Titulo { text: "TUS NOTAS DE ESTE JUEGO"; visible: raiz.pestana === 0 }
                 Rectangle {
+                    visible: raiz.pestana === 0
                     width: parent.width
                     height: 150
                     radius: 12
@@ -811,11 +924,32 @@ ShellRoot {
                 }
 
                 Rectangle { width: parent.width; height: 1; color: "#22ffffff" }
-                Titulo { text: "ASISTENTE" }
+                // Abajo van dos pestañas: el asistente y, si el juego se lanzó
+                // con él, el entrenador.
+                Row {
+                    spacing: 26
+                    Repeater {
+                        model: raiz.hayEntrenador ? ["ASISTENTE", "ENTRENADOR"] : ["ASISTENTE"]
+                        Text {
+                            required property string modelData
+                            required property int index
+                            text: modelData
+                            color: raiz.pestana === index ? raiz.cian : "#6f7590"
+                            font { family: "Inter Display"; weight: Font.Bold; pixelSize: 12; letterSpacing: 4 }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -8
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: raiz.pestana = index
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Asistente: ocupa lo que queda hasta abajo ──
             Item {
+                visible: raiz.pestana === 0
                 anchors { top: arriba.bottom; bottom: parent.bottom; left: parent.left; right: parent.right; margins: 22; topMargin: 12 }
 
                 Flickable {
@@ -931,6 +1065,231 @@ ShellRoot {
                         function onEscribiendoChanged() {
                             if (raiz.escribiendo) campo.forceActiveFocus()
                             else campo.focus = false
+                        }
+                    }
+                }
+            }
+
+            // ── Entrenador ──
+            Item {
+                id: zonaEntrenador
+                visible: raiz.pestana === 1
+                anchors { top: arriba.bottom; bottom: parent.bottom; left: parent.left; right: parent.right; margins: 22; topMargin: 12 }
+
+                readonly property bool listo: raiz.estadoEntrenador.legible === true
+                readonly property string freno: raiz.estadoEntrenador.anticheat || ""
+
+                component Pastilla: Rectangle {
+                    id: pastilla
+                    property string texto: ""
+                    property bool marcada: false
+                    property bool activa: true
+                    signal pulsada()
+                    height: 30
+                    width: rotuloPastilla.implicitWidth + 22
+                    radius: 15
+                    opacity: activa ? 1 : 0.4
+                    color: marcada ? Qt.alpha(raiz.cian, 0.35) : (zonaPastilla.containsMouse ? "#2effffff" : "#14ffffff")
+                    border.width: 1
+                    border.color: marcada ? raiz.cian : "#40ffffff"
+                    Text {
+                        id: rotuloPastilla
+                        anchors.centerIn: parent
+                        text: pastilla.texto
+                        color: "#ffffff"
+                        font { family: "Inter Display"; weight: Font.Bold; pixelSize: 11; letterSpacing: 1 }
+                    }
+                    MouseArea {
+                        id: zonaPastilla
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: pastilla.activa ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: if (pastilla.activa) pastilla.pulsada()
+                    }
+                }
+
+                Column {
+                    id: mandos
+                    anchors { top: parent.top; left: parent.left; right: parent.right }
+                    spacing: 10
+
+                    // La advertencia va siempre a la vista.
+                    Rectangle {
+                        width: parent.width
+                        height: textoAdvertencia.implicitHeight + 18
+                        radius: 10
+                        color: zonaEntrenador.freno !== "" ? "#40ff2a4e" : "#2effb020"
+                        border.width: 1
+                        border.color: zonaEntrenador.freno !== "" ? "#ff5a7a" : "#ffb020"
+                        Text {
+                            id: textoAdvertencia
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: 10 }
+                            wrapMode: Text.WordWrap
+                            color: "#ffe9c2"
+                            text: zonaEntrenador.freno !== ""
+                                  ? "Hay un anticheat corriendo (" + zonaEntrenador.freno + "). Con él activo el entrenador no hace nada: tocar la memoria así termina en baneo."
+                                  : "Solo para partidas sin conexión. En un juego en línea, cambiar la memoria puede terminar en el baneo de tu cuenta."
+                            font { family: "Inter Display"; weight: Font.DemiBold; pixelSize: 12 }
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        elide: Text.ElideRight
+                        color: "#8a8fa8"
+                        text: !enchufe.connected ? "Esperando que parta el juego…"
+                              : zonaEntrenador.listo ? "Mirando: " + raiz.estadoEntrenador.nombre
+                              : "Todavía no puedo leer la memoria del juego."
+                        font { family: "Inter Display"; pixelSize: 12 }
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 8
+                        Rectangle {
+                            width: parent.width - tipoEntero.width - tipoDecimal.width - 16
+                            height: 38
+                            radius: 10
+                            color: "#1affffff"
+                            border.width: campoValor.activeFocus ? 2 : 1
+                            border.color: campoValor.activeFocus ? raiz.cian : "#40ffffff"
+                            TextInput {
+                                id: campoValor
+                                anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
+                                verticalAlignment: TextInput.AlignVCenter
+                                clip: true
+                                color: "#ffffff"
+                                selectionColor: raiz.cian
+                                selectByMouse: true
+                                validator: RegularExpressionValidator { regularExpression: /-?[0-9]*[.,]?[0-9]*/ }
+                                font { family: "Inter Display"; pixelSize: 16 }
+                                onAccepted: raiz.cuantos < 0 ? zonaEntrenador.buscar() : zonaEntrenador.filtrar("igual")
+                                Keys.onEscapePressed: { focus = false; raiz.editando = false }
+                            }
+                            Text {
+                                anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
+                                visible: campoValor.text === ""
+                                text: "El número que ves en el juego"
+                                color: "#7d8299"
+                                font { family: "Inter Display"; pixelSize: 14 }
+                            }
+                            // Superpuesto, el primer clic pide el teclado (Esc lo devuelve).
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: raiz.superpuesto && !raiz.editando
+                                cursorShape: Qt.IBeamCursor
+                                onClicked: { raiz.editando = true; campoValor.forceActiveFocus() }
+                            }
+                        }
+                        Pastilla {
+                            id: tipoEntero
+                            anchors.verticalCenter: parent.verticalCenter
+                            texto: "ENTERO"
+                            marcada: raiz.tipoValor === "i32"
+                            activa: raiz.cuantos < 0
+                            onPulsada: raiz.tipoValor = "i32"
+                        }
+                        Pastilla {
+                            id: tipoDecimal
+                            anchors.verticalCenter: parent.verticalCenter
+                            texto: "DECIMAL"
+                            marcada: raiz.tipoValor === "f32"
+                            activa: raiz.cuantos < 0
+                            onPulsada: raiz.tipoValor = "f32"
+                        }
+                    }
+
+                    Flow {
+                        width: parent.width
+                        spacing: 6
+                        Pastilla { visible: raiz.cuantos < 0; texto: raiz.entrenando ? "BUSCANDO…" : "BUSCAR"; marcada: true
+                                   activa: zonaEntrenador.listo && !raiz.entrenando && campoValor.text !== ""; onPulsada: zonaEntrenador.buscar() }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "AHORA VALE ESTO"; marcada: true
+                                   activa: !raiz.entrenando && campoValor.text !== ""; onPulsada: zonaEntrenador.filtrar("igual") }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "CAMBIÓ"; activa: !raiz.entrenando; onPulsada: zonaEntrenador.filtrar("cambio") }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "NO CAMBIÓ"; activa: !raiz.entrenando; onPulsada: zonaEntrenador.filtrar("sin_cambio") }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "SUBIÓ"; activa: !raiz.entrenando; onPulsada: zonaEntrenador.filtrar("subio") }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "BAJÓ"; activa: !raiz.entrenando; onPulsada: zonaEntrenador.filtrar("bajo") }
+                        Pastilla { visible: raiz.cuantos >= 0; texto: "EMPEZAR DE NUEVO"; onPulsada: raiz.ordenar({ op: "reiniciar" }) }
+                    }
+
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        color: "#c4c9de"
+                        lineHeight: 1.15
+                        text: raiz.cuantos < 0 ? "Escribe un número que veas en pantalla (monedas, vida, flechas) y busca. Después haz que cambie en el juego y filtra, hasta que queden pocos."
+                              : raiz.cuantos > 300 ? "Quedan " + raiz.cuantos.toLocaleString(Qt.locale("es_CL"), "f", 0) + " candidatos. Haz que el número cambie en el juego, escribe el nuevo y aprieta «Ahora vale esto»."
+                              : raiz.cuantos > 0 ? "Quedan " + raiz.cuantos + ". Escribe el valor que quieres y ponlo o congélalo."
+                              : ""
+                        font { family: "Inter Display"; pixelSize: 13 }
+                    }
+                    Text {
+                        width: parent.width
+                        visible: raiz.avisoEntrenador !== ""
+                        wrapMode: Text.WordWrap
+                        text: raiz.avisoEntrenador
+                        color: "#ffb4c8"
+                        font { family: "Inter Display"; weight: Font.DemiBold; pixelSize: 13 }
+                    }
+
+                    // Con pocos candidatos, lo rápido es escribir en todos: uno es
+                    // el valor de verdad y los demás suelen ser copias.
+                    Flow {
+                        width: parent.width
+                        spacing: 6
+                        visible: raiz.cuantos > 0 && raiz.cuantos <= 300
+                        Pastilla { texto: "PONER EN TODOS"; marcada: true; activa: campoValor.text !== ""
+                                   onPulsada: raiz.ordenar({ op: "poner_todos", valor: campoValor.text }) }
+                        Pastilla { texto: "CONGELAR TODOS"; activa: campoValor.text !== ""
+                                   onPulsada: raiz.ordenar({ op: "congelar_todos", valor: campoValor.text, si: true }) }
+                        Pastilla { texto: "SOLTAR TODOS"; activa: (raiz.estadoEntrenador.congelados || 0) > 0
+                                   onPulsada: raiz.ordenar({ op: "congelar_todos", valor: "0", si: false }) }
+                    }
+                }
+
+                function buscar() {
+                    if (campoValor.text !== "")
+                        raiz.ordenar({ op: "buscar", valor: campoValor.text, tipo: raiz.tipoValor })
+                }
+                function filtrar(modo) {
+                    raiz.ordenar({ op: "filtrar", modo: modo, valor: campoValor.text })
+                }
+
+                // Los candidatos, con su valor de ahora.
+                ListView {
+                    anchors { top: mandos.bottom; topMargin: 10; bottom: parent.bottom; left: parent.left; right: parent.right }
+                    visible: raiz.candidatos.length > 0
+                    clip: true
+                    spacing: 4
+                    model: raiz.candidatos
+                    boundsBehavior: Flickable.StopAtBounds
+                    delegate: Rectangle {
+                        id: filaValor
+                        required property var modelData
+                        width: ListView.view.width
+                        height: 34
+                        radius: 8
+                        color: modelData.congelado ? Qt.alpha(raiz.cian, 0.16) : "#0dffffff"
+                        border.width: 1
+                        border.color: modelData.congelado ? raiz.cian : "#22ffffff"
+                        Text {
+                            anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
+                            text: filaValor.modelData.valor + (filaValor.modelData.congelado ? "   (fijo en " + filaValor.modelData.fijo + ")" : "")
+                            color: "#ffffff"
+                            font { family: "Inter Display"; weight: Font.DemiBold; pixelSize: 15 }
+                        }
+                        Row {
+                            anchors { right: parent.right; rightMargin: 6; verticalCenter: parent.verticalCenter }
+                            spacing: 6
+                            Pastilla { height: 24; texto: "PONER"; activa: campoValor.text !== ""
+                                       onPulsada: raiz.ordenar({ op: "poner", dir: filaValor.modelData.dir, valor: campoValor.text }) }
+                            Pastilla { height: 24; texto: filaValor.modelData.congelado ? "SOLTAR" : "CONGELAR"
+                                       marcada: filaValor.modelData.congelado
+                                       activa: filaValor.modelData.congelado || campoValor.text !== ""
+                                       onPulsada: raiz.ordenar({ op: "congelar", dir: filaValor.modelData.dir,
+                                                                 valor: campoValor.text !== "" ? campoValor.text : filaValor.modelData.fijo,
+                                                                 si: !filaValor.modelData.congelado }) }
                         }
                     }
                 }

@@ -470,6 +470,12 @@ FocusScope {
                     onCambiado: nuevo => panel.ponerAjuste("COMPANERO", nuevo)
                 }
                 Interruptor {
+                    texto: "Entrenador (trucos en vivo)"
+                    detalle: "Busca y cambia valores del juego desde el compañero. Solo sin conexión: en línea puede haber baneo."
+                    valor: panel.ajustes.entrenador === true
+                    onCambiado: nuevo => panel.ponerAjuste("ENTRENADOR", nuevo)
+                }
+                Interruptor {
                     texto: "Las preguntas llevan una captura del juego"
                     detalle: "Solo al preguntar, solo la pantalla del juego, y se borra al responder."
                     valor: panel.ajustes.captura === true

@@ -49,8 +49,10 @@ FocusScope {
     signal ponerTruco(string clave, bool activo, string opcion)
     readonly property bool hayTrucos: actual !== null && actual.trucos === true
 
+    // Se abre con cualquier juego: si sus trucos no se manejan desde aquí,
+    // el panel lo dice, en vez de que la tecla no haga nada.
     function abrirTrucos() {
-        if (!hayTrucos)
+        if (actual === null)
             return
         trucosAbiertos = true
         pedirTrucos(actual.id)
@@ -160,6 +162,13 @@ FocusScope {
         return partes.join("   ·   ")
     }
 
+    // Solo para pruebas con teclas de verdad (MJ_PRUEBA_TECLADO): deja
+    // constancia de lo que el teclado logró mover.
+    readonly property bool bitacora: Quickshell.env("MJ_PRUEBA_TECLADO") === "1"
+    onActualChanged: if (bitacora && actual) console.warn("TECLADO elegido: " + actual.nombre)
+    onTrucosAbiertosChanged: if (bitacora) console.warn("TECLADO panel de trucos: " + (trucosAbiertos ? "abierto" : "cerrado"))
+    onAjustesAbiertosChanged: if (bitacora) console.warn("TECLADO ajustes: " + (ajustesAbiertos ? "abiertos" : "cerrados"))
+
     focus: true
     Keys.onPressed: ev => {
         // Con los trucos abiertos, todas las teclas son del panel.
@@ -185,7 +194,10 @@ FocusScope {
         case Qt.Key_Escape: accion("atras"); break
         case Qt.Key_F10: salirModo(); break
         case Qt.Key_F2: accion("menu"); break
-        case Qt.Key_F3: abrirTrucos(); break
+        // La T hace lo mismo: en algunos portátiles la fila de F1 a F12
+        // manda brillo o volumen si no se aprieta Fn.
+        case Qt.Key_F3: case Qt.Key_T: abrirTrucos(); break
+        case Qt.Key_A: accion("menu"); break
         default: return
         }
         ev.accepted = true
@@ -512,9 +524,9 @@ FocusScope {
             }
         }
 
-        // Solo cuando el juego elegido tiene trucos que se pueden manejar.
+        // Resaltado cuando el juego elegido tiene trucos que se manejan desde aquí.
         Rectangle {
-            visible: lanz.hayTrucos
+            opacity: lanz.hayTrucos ? 1 : 0.55
             anchors { right: botonAjustes.left; rightMargin: 12 * lanz.u; verticalCenter: parent.verticalCenter }
             height: 40 * lanz.u; width: txTrucos.implicitWidth + 40 * lanz.u; radius: height / 2
             color: zonaTrucos.containsMouse ? Qt.alpha(lanz.magenta, 0.3) : Qt.alpha(lanz.magenta, 0.12)
@@ -523,7 +535,7 @@ FocusScope {
             Text {
                 id: txTrucos
                 anchors.centerIn: parent
-                text: "F3   TRUCOS"
+                text: "F3 · T   TRUCOS"
                 color: "#ffffff"
                 font { family: "Inter Display"; weight: Font.Bold; pixelSize: 14 * lanz.u; letterSpacing: 1.5 * lanz.u }
             }
@@ -546,7 +558,7 @@ FocusScope {
             Text {
                 id: txAjustes
                 anchors.centerIn: parent
-                text: "F2   AJUSTES"
+                text: "F2 · A   AJUSTES"
                 color: "#ffffff"
                 font { family: "Inter Display"; weight: Font.Bold; pixelSize: 14 * lanz.u; letterSpacing: 1.5 * lanz.u }
             }

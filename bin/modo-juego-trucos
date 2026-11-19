@@ -250,9 +250,15 @@ def main():
         return 1
     manejador = MANEJADORES.get(item.get("sistema", ""))
     if args[0] == "listar":
-        if not manejador:
+        if not manejador and item.get("sistema"):
             resultado = {"disponible": False, "trucos": [],
-                         "motivo": "Los trucos de este emulador todavía se manejan desde el propio emulador."}
+                         "motivo": f"Los trucos de {item['sistema']} todavía no se manejan desde aquí: por ahora solo "
+                                   "los de Wii U (Cemu). Mientras tanto se activan en el propio emulador."}
+        elif not manejador:
+            resultado = {"disponible": False, "trucos": [],
+                         "motivo": "Este juego no trae trucos propios que se puedan encender desde aquí. En los juegos "
+                                   "de PC los trucos van con un programa aparte (un entrenador); esa parte todavía "
+                                   "no está hecha."}
         else:
             resultado = manejador[0](item)
         resultado["juego"] = item.get("nombre", "")

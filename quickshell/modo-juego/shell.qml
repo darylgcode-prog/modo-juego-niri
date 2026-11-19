@@ -396,7 +396,9 @@ ShellRoot {
             WlrLayershell.namespace: "modo-juego"
             WlrLayershell.layer: WlrLayer.Overlay
             // La salida no pide nada: no toma el teclado.
-            WlrLayershell.keyboardFocus: principal && raiz.prueba === 0 && raiz.modo !== "salida"
+            // (En las pruebas no se toma, salvo que la prueba sea justo del teclado.)
+            WlrLayershell.keyboardFocus: principal && raiz.modo !== "salida"
+                                         && (raiz.prueba === 0 || Quickshell.env("MJ_PRUEBA_TECLADO") === "1")
                                          ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
             Escena {

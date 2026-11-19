@@ -299,6 +299,9 @@ Item {
         Loader {
             id: cargaLanzador
             anchors.fill: parent
+            // El cargador tiene que tener el foco: sin esto, lo que carga
+            // nunca recibe el teclado (solo respondería al ratón).
+            focus: true
             active: esc.principal && esc.centro.modo !== "salida"
             sourceComponent: Lanzador {
                 u: esc.u
@@ -412,14 +415,14 @@ Item {
         id: animALanzador
         NumberAnimation { target: titulo; property: "opacity"; to: 0; duration: 320; easing.type: Easing.InQuad }
         NumberAnimation { target: titulo; property: "scale"; to: 0.82; duration: 320; easing.type: Easing.InQuad }
-        ScriptAction { script: { fondo.atenuar = 1; cargaLanzador.item.activo = true } }
+        ScriptAction { script: { fondo.atenuar = 1; cargaLanzador.item.activo = true; cargaLanzador.item.forceActiveFocus() } }
     }
 
     // Lanzador abierto sin entrada (Mod+Alt+J).
     ParallelAnimation {
         id: animAparecer
         NumberAnimation { target: mundo; property: "opacity"; from: 0; to: 1; duration: 320; easing.type: Easing.OutQuad }
-        ScriptAction { script: cargaLanzador.item.activo = true }
+        ScriptAction { script: { cargaLanzador.item.activo = true; cargaLanzador.item.forceActiveFocus() } }
     }
 
     // Pantalla secundaria: se aparta.

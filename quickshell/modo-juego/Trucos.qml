@@ -53,7 +53,7 @@ FocusScope {
         case Qt.Key_Left: case Qt.Key_H: accion("izq"); break
         case Qt.Key_Right: case Qt.Key_L: accion("der"); break
         case Qt.Key_Return: case Qt.Key_Enter: case Qt.Key_Space: accion("ok"); break
-        case Qt.Key_Escape: case Qt.Key_F3: accion("atras"); break
+        case Qt.Key_Escape: case Qt.Key_F3: case Qt.Key_T: accion("atras"); break
         default: return
         }
         ev.accepted = true

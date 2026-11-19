@@ -56,6 +56,9 @@ se oculta con `Mod+Alt+C`. Trae:
   como en el buscador de una wiki, está el botón «Escribir en la página».
 - **Un panel** con el tiempo de la sesión, temperaturas y tus notas de ese
   juego.
+- **Un entrenador** para trucos en vivo: buscas un número que ves en
+  pantalla (monedas, vida, flechas), lo aíslas y lo cambias o lo congelas.
+  Funciona con juegos de PC y de emulador abiertos desde el lanzador.
 - **Un asistente** (opcional) al que le preguntas sobre el juego. Usa la API
   de Anthropic con búsqueda web y, si quieres, una captura de lo que estás
   viendo. Se paga por uso en tu propia cuenta.
@@ -82,6 +85,7 @@ puede hacer falta ajustar cosas; los reportes son bienvenidos.
 | un navegador tipo Chromium | las guías del compañero |
 | grim | la captura que acompaña las preguntas al asistente |
 | python-evdev | manejar el lanzador con mando |
+| python-numpy | el entrenador (trucos en vivo) |
 | power-profiles-daemon | perfil de rendimiento al jugar |
 | MangoHud | contador de FPS en los juegos |
 | asusctl | que el teclado reaccione (portátiles ASUS) |
@@ -219,6 +223,31 @@ durabilidad) se cambian con las flechas. Valen la próxima vez que abras el
 juego y Cemu tiene que estar cerrado. Antes del primer cambio queda una copia
 de la configuración de Cemu en `settings.xml.antes-de-trucos`. Los nombres y
 descripciones salen de los propios paquetes, en inglés.
+
+### Entrenador
+
+En el compañero, pestaña **Entrenador**. El recorrido es el de siempre en
+estas herramientas:
+
+1. Escribe un número que veas en el juego y busca.
+2. Haz que cambie en el juego, escribe el nuevo y aprieta «Ahora vale esto»
+   (o «Cambió», «Subió», «Bajó» si no sabes el número exacto).
+3. Cuando queden pocos candidatos, escribe el valor que quieres y ponlo o
+   congélalo. «Poner en todos» es lo más rápido: uno es el valor de verdad y
+   los demás suelen ser copias.
+
+Cosas que conviene saber:
+
+- **Es para partidas sin conexión.** En un juego en línea, cambiar la memoria
+  puede terminar en el baneo de tu cuenta y perjudica a los demás. Si hay un
+  anticheat corriendo (EasyAntiCheat, BattlEye y otros), el entrenador lo
+  detecta y no hace nada. No trae ni traerá forma de esquivarlo.
+- **Hay que encontrar el valor en cada sesión.** Su lugar en la memoria
+  cambia cada vez que abres el juego.
+- **Solo con juegos abiertos desde el lanzador.** El entrenador tiene que ser
+  quien lanza el juego para poder leerle la memoria, así que no sirve con los
+  que abre Steam por su cuenta.
+- Necesita el paquete `numpy` de Python. Se apaga en Ajustes.
 
 ### Agregar un juego suelto
 
