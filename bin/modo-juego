@@ -9,8 +9,10 @@
 #   modo-juego lanzador     abre o cierra el lanzador de juegos (Mod+Alt+J)
 #   modo-juego animacion    muestra la entrada y el lanzador, sin cerrar nada
 #   modo-juego salida       muestra la secuencia de salida, con datos de ejemplo
-#   modo-juego companero siguiente|anterior|bajar|subir|preguntar
-#                           maneja el compañero del segundo monitor (lo usan los atajos)
+#   modo-juego companero alternar|siguiente|anterior|bajar|subir|preguntar
+#                           maneja el compañero de juego (lo usan los atajos)
+#   modo-juego actualizar   baja la última versión y la instala
+#   modo-juego version      dice qué versión está instalada
 #   modo-juego caratulas    busca las carátulas que falten (Steam y SteamGridDB)
 #   modo-juego clave-steamgriddb   guarda tu clave de SteamGridDB (te la pide)
 #                           (también se hace desde el lanzador: F2, Ajustes)
@@ -89,10 +91,13 @@ HUD=si
 AL_ACTIVAR=''
 AL_DESACTIVAR=''
 
-# Compañero de juego: al abrir un juego desde el lanzador, el otro monitor
-# muestra sus guías, tus notas, la sesión y un asistente. Necesita dos
-# pantallas encendidas.
+# Compañero de juego: al abrir un juego desde el lanzador muestra sus
+# guías, tus notas, la sesión y un asistente. Con dos pantallas va en la
+# que queda libre; con una sola se dibuja encima del juego, translúcido, y
+# se muestra y oculta con un atajo.
 COMPANERO=si
+# Cuán opaco es el compañero cuando va encima del juego (30 a 100).
+OPACIDAD_COMPANERO=88
 # Modelo del asistente: opus, sonnet o haiku (de más capaz a más barato).
 ASISTENTE_MODELO=opus
 # "si": cada pregunta lleva una captura de la pantalla del juego.
@@ -349,47 +354,73 @@ companero_cerrar() {
   return 0
 }
 
-# Abre el compañero en la pantalla que no usa el juego. Devuelve 1 si no
-# corresponde (apagado en Ajustes, o no hay una segunda pantalla).
+# Abre el compañero. Con dos pantallas va en la que no usa el juego, con
+# el navegador de guías al lado. Con una sola va superpuesto: el panel se
+# dibuja encima del juego y las guías se ven como imágenes que entrega un
+# navegador sin ventana. Devuelve 1 si está apagado en Ajustes.
 companero_abrir() {
-  local id=$1 nombre=$2 del_juego otra guias caratula u navegador
+  local id=$1 nombre=$2 del_juego otra guias caratula u navegador superpuesto=no pantalla
   local -a urls=()
   [[ $COMPANERO = si && -f $COMPANERO_DIR/shell.qml ]] || return 1
   del_juego=$(niri msg -j focused-output 2>/dev/null | jq -r '.name // empty')
+  [[ -n $del_juego ]] || return 1
   otra=$(niri msg -j outputs 2>/dev/null |
     jq -r --arg e "$del_juego" 'to_entries[] | select(.value.logical != null and .key != $e) | .key' | head -1)
-  [[ -n $del_juego && -n $otra ]] || return 1
+  pantalla=$otra
+  if [[ -z $otra ]]; then
+    superpuesto=si
+    pantalla=$del_juego
+  fi
   companero_cerrar
   guias=$(guias_de "$id" "$nombre")
   caratula=$(jq -r --arg i "$id" '.juegos[]? | select(.id == $i) | .caratula // ""' "$CATALOGO" 2>/dev/null | head -1)
   mapfile -t urls < <(jq -r '.[].url' <<<"$guias")
 
+  # El navegador de guías usa perfil y puerto de control propios (solo este
+  # equipo puede hablarle): así el panel cambia de guía y desplaza sin
+  # quitarle el foco al juego.
   if ((${#urls[@]})) && navegador=$(navegador_guias); then
-    # Perfil y puerto de control propios (solo este equipo puede hablarle):
-    # así el panel cambia de pestaña y desplaza sin quitarle el foco al juego.
-    niri msg action spawn -- "$navegador" --user-data-dir="$NAVEGADOR_DIR" \
-      --remote-debugging-port="$PUERTO_GUIAS" "--remote-allow-origins=*" --class=modo-juego-guias \
-      --no-first-run --no-default-browser-check --hide-crash-restore-bubble --new-window "${urls[@]}"
-    # Cuando aparezca su ventana, a la otra pantalla.
-    (
-      for _ in $(seq 1 80); do
-        u=$(niri msg -j windows 2>/dev/null | jq -r '[.[] | select(.app_id == "modo-juego-guias")][0].id // empty')
-        if [[ -n $u ]]; then
-          niri msg action move-window-to-monitor --id "$u" "$otra"
-          break
-        fi
-        sleep 0.25
-      done
-    ) >/dev/null 2>&1 &
+    if [[ $superpuesto = si ]]; then
+      # Sin ventana: parte con la primera guía y las demás se abren por el
+      # puerto de control cuando ya responde.
+      niri msg action spawn -- "$navegador" --headless=new --user-data-dir="$NAVEGADOR_DIR" \
+        --remote-debugging-port="$PUERTO_GUIAS" "--remote-allow-origins=*" --window-size=1040,1320 \
+        --hide-scrollbars --no-first-run --no-default-browser-check "${urls[0]}"
+      (
+        for _ in $(seq 1 60); do
+          curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PUERTO_GUIAS/json/version" && break
+          sleep 0.3
+        done
+        for u in "${urls[@]:1}"; do
+          curl -s -o /dev/null -X PUT --max-time 5 "http://127.0.0.1:$PUERTO_GUIAS/json/new?$u"
+        done
+      ) >/dev/null 2>&1 &
+    else
+      niri msg action spawn -- "$navegador" --user-data-dir="$NAVEGADOR_DIR" \
+        --remote-debugging-port="$PUERTO_GUIAS" "--remote-allow-origins=*" --class=modo-juego-guias \
+        --no-first-run --no-default-browser-check --hide-crash-restore-bubble --new-window "${urls[@]}"
+      # Cuando aparezca su ventana, a la otra pantalla.
+      (
+        for _ in $(seq 1 80); do
+          u=$(niri msg -j windows 2>/dev/null | jq -r '[.[] | select(.app_id == "modo-juego-guias")][0].id // empty')
+          if [[ -n $u ]]; then
+            niri msg action move-window-to-monitor --id "$u" "$otra"
+            break
+          fi
+          sleep 0.25
+        done
+      ) >/dev/null 2>&1 &
+    fi
   else
     guias='[]'
   fi
 
-  niri msg action spawn -- env MJC_PANTALLA="$otra" MJC_PANTALLA_JUEGO="$del_juego" MJC_ID="$id" \
+  niri msg action spawn -- env MJC_PANTALLA="$pantalla" MJC_PANTALLA_JUEGO="$del_juego" MJC_ID="$id" \
     MJC_NOMBRE="$nombre" MJC_CARATULA="$caratula" MJC_GUIAS="$guias" MJC_PUERTO="$PUERTO_GUIAS" \
     MJC_NOTAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/notas/$id.md" \
     MJC_HISTORIAL="$DIR/historial-asistente.json" MJC_MODELO="$ASISTENTE_MODELO" \
-    MJC_CAPTURA="$ASISTENTE_CAPTURA" qs -p "$COMPANERO_DIR"
+    MJC_CAPTURA="$ASISTENTE_CAPTURA" MJC_SUPERPUESTO="$superpuesto" MJC_OPACIDAD="$OPACIDAD_COMPANERO" \
+    qs -p "$COMPANERO_DIR"
   return 0
 }
 
@@ -552,10 +583,27 @@ mostrar_ajustes() {
     local variable=${par%%:*}
     json+="\"${par##*:}\": $([[ ${!variable} = si ]] && echo true || echo false), "
   done
-  printf '{%s"modelo": "%s", "clave": %s, "claveIa": %s, "hayTeclado": %s, "hayHud": %s, "pantallas": %s}\n' \
-    "$json" "$ASISTENTE_MODELO" "$clave" "$clave_ia" \
+  printf '{%s"modelo": "%s", "version": "%s", "clave": %s, "claveIa": %s, "hayTeclado": %s, "hayHud": %s, "pantallas": %s}\n' \
+    "$json" "$ASISTENTE_MODELO" "$(version_instalada)" "$clave" "$clave_ia" \
     "$(command -v asusctl >/dev/null && echo true || echo false)" \
     "$(command -v mangohud >/dev/null && echo true || echo false)" "${pantallas:-1}"
+}
+
+# Qué versión está instalada (la anota el instalador), o vacío.
+version_instalada() {
+  head -1 "${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/version" 2>/dev/null | tr -d '"\\'
+}
+
+# Baja la última versión y la instala, desde la carpeta de donde se instaló.
+actualizar() {
+  local origen
+  origen=$(head -1 "${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/origen" 2>/dev/null)
+  if [[ -z $origen || ! -x $origen/install.sh ]]; then
+    echo "No sé de dónde se instaló (¿moviste o borraste la carpeta del repositorio?)." >&2
+    echo "Ve a esa carpeta y ejecuta:  ./install.sh --actualizar" >&2
+    return 1
+  fi
+  "$origen/install.sh" --actualizar "$@"
 }
 
 # Guarda la clave de Anthropic (solo legible por el usuario) y la prueba.
@@ -1018,6 +1066,14 @@ case $accion in
     poner_ajuste "$@"
     ;;
   ajustes) mostrar_ajustes ;;
+  actualizar)
+    shift
+    actualizar "$@"
+    ;;
+  version)
+    v=$(version_instalada)
+    echo "${v:-No sé qué versión es: no se instaló con el instalador.}"
+    ;;
   jugar)
     shift
     jugar "$@"
@@ -1025,11 +1081,11 @@ case $accion in
   teclado-impacto) teclado_impacto ;;
   companero)
     case ${2:-} in
-      siguiente | anterior | bajar | subir | preguntar)
+      alternar | siguiente | anterior | bajar | subir | preguntar)
         pgrep -fx "qs -p $COMPANERO_DIR" >/dev/null && qs -p "$COMPANERO_DIR" ipc call companero "$2" >/dev/null
         ;;
       cerrar) companero_cerrar ;;
-      *) echo "Uso: modo-juego companero siguiente|anterior|bajar|subir|preguntar|cerrar" >&2; exit 2 ;;
+      *) echo "Uso: modo-juego companero alternar|siguiente|anterior|bajar|subir|preguntar|cerrar" >&2; exit 2 ;;
     esac
     ;;
   preguntar)
@@ -1051,7 +1107,7 @@ case $accion in
     abrir_escena salida
     ;;
   *)
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

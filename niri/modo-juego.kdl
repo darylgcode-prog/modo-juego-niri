@@ -14,7 +14,11 @@ binds {
         spawn "modo-juego" "lanzador";
     }
 
-    // Compañero de juego (segundo monitor): se manejan sin soltar el juego.
+    // Compañero de juego: se maneja sin soltar el juego. Con una sola
+    // pantalla va encima del juego y este atajo lo muestra y lo oculta.
+    Mod+Alt+C hotkey-overlay-title="Compañero: mostrar u ocultar" {
+        spawn "modo-juego" "companero" "alternar";
+    }
     Mod+Alt+Right hotkey-overlay-title="Compañero: guía siguiente" {
         spawn "modo-juego" "companero" "siguiente";
     }

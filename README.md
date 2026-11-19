@@ -40,12 +40,17 @@ los programas que cerró y muestra un resumen de la sesión.
 - Recuerda lo último que jugaste y cuántas horas llevas.
 - Se maneja con teclado, ratón o mando.
 
-**El compañero (segundo monitor)**
+**El compañero de juego**
 
-Al abrir un juego, la pantalla que queda libre muestra:
+Al abrir un juego aparece un compañero. Con dos pantallas va en la que queda
+libre; con una sola se dibuja encima del juego, translúcido, y se muestra y
+se oculta con `Mod+Alt+C`. Trae:
 
-- **Guías** del juego en un navegador aparte, que cambias y desplazas con
-  atajos sin quitarle el foco al juego.
+- **Guías** del juego, que cambias y desplazas con atajos sin quitarle el
+  foco al juego. Con dos pantallas van en un navegador aparte. Con una sola
+  se transmiten en vivo dentro del compañero y se usan con el ratón (clic,
+  arrastre y rueda: sirve para mapas interactivos); para escribir en ellas,
+  como en el buscador de una wiki, está el botón «Escribir en la página».
 - **Un panel** con el tiempo de la sesión, temperaturas y tus notas de ese
   juego.
 - **Un asistente** (opcional) al que le preguntas sobre el juego. Usa la API
@@ -103,6 +108,7 @@ va a tu carpeta personal (`~/.local/bin`, `~/.config/quickshell` y
 | `./install.sh --si` | instala lo necesario y lo recomendado sin preguntar |
 | `./install.sh --sin-dependencias` | no instala paquetes: solo dice qué falta |
 | `./install.sh --asistente` | además prepara el asistente con IA |
+| `./install.sh --actualizar` | baja la última versión y la instala |
 
 Conoce los paquetes de Arch (`pacman`), Debian y Ubuntu (`apt`) y Fedora
 (`dnf`). Los nombres de Arch están comprobados; los de las otras dos no. Fuera
@@ -136,12 +142,26 @@ de Anthropic):
 ./install.sh --asistente
 ```
 
+## Actualizar
+
+```bash
+modo-juego actualizar
+```
+
+Trae lo nuevo del repositorio, muestra qué cambió y lo instala. Es lo mismo
+que `./install.sh --actualizar` desde la carpeta donde lo clonaste, así que
+esa carpeta tiene que seguir ahí. Tu configuración no se toca. Si una versión
+trae atajos nuevos y tu `modo-juego.kdl` tiene cambios propios, no se pisa:
+el nuevo queda al lado como `modo-juego.kdl.nuevo` para que copies lo que te
+sirva. La versión instalada se ve con `modo-juego version` y en Ajustes.
+
 ## Atajos
 
 | Atajo | Qué hace |
 |---|---|
 | `Mod+Alt+G` | Activa o desactiva el modo juego |
 | `Mod+Alt+J` | Abre o cierra el lanzador |
+| `Mod+Alt+C` | Compañero: lo muestra o lo oculta |
 | `Mod+Alt+← →` | Compañero: cambia de guía |
 | `Mod+Alt+↑ ↓` | Compañero: desplaza la guía |
 | `Mod+Alt+P` | Compañero: pregunta al asistente |
@@ -197,6 +217,11 @@ modo-juego agregar "Nombre del juego" /ruta/al/ejecutable
   programa no pregunta al cerrarse.
 - **Servicios del sistema.** Detenerlos y volver a encenderlos pide tu
   contraseña. Con `SERVICIOS_SISTEMA=()` no se pide nada.
+- **El compañero encima del juego** (una sola pantalla) no toma el teclado
+  al mostrarse: solo cuando preguntas, haces clic en las notas o activas
+  «Escribir en la página», y `Esc` lo devuelve al juego. Si el juego tiene
+  capturado el ratón, hay que pausarlo o abrir su menú para poder mover el
+  puntero hasta el compañero.
 - **El navegador de guías** usa un perfil propio, separado de tu navegador,
   con un puerto de depuración en `127.0.0.1:9333` por el que el panel lo
   maneja. Mientras el compañero está abierto, cualquier programa de tu

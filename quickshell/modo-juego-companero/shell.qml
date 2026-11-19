@@ -20,6 +20,10 @@ import Quickshell.Wayland
 //   MJC_HISTORIAL       archivo con las preguntas de esta sesión
 //   MJC_MODELO          opus | sonnet | haiku
 //   MJC_CAPTURA         «si» = las preguntas llevan una captura del juego
+//   MJC_SUPERPUESTO     «si» = una sola pantalla: va encima del juego, translúcido,
+//                       oculto hasta que se pide, con la guía transmitida en vivo
+//                       al lado (se usa con el ratón)
+//   MJC_OPACIDAD        cuán opaco es cuando va superpuesto (30 a 100)
 //   MJC_PRUEBA, MJC_FOTO   solo para pruebas: segundos de vida y dónde
 //                          guardar lo que dibuja la franja
 ShellRoot {
@@ -32,6 +36,13 @@ ShellRoot {
     readonly property string modelo: Quickshell.env("MJC_MODELO") || "opus"
     readonly property bool conCaptura: Quickshell.env("MJC_CAPTURA") !== "no"
     readonly property int prueba: parseInt(Quickshell.env("MJC_PRUEBA") || "0")
+    readonly property bool superpuesto: Quickshell.env("MJC_SUPERPUESTO") === "si"
+    readonly property real opacidad: Math.max(0.3, Math.min(1, (parseInt(Quickshell.env("MJC_OPACIDAD") || "88") || 88) / 100))
+    // Superpuesto parte oculto, para no tapar el juego; se muestra con el atajo.
+    property bool aLaVista: !superpuesto || prueba > 0
+    property bool ocultoPorCaptura: false   // se quita un instante para no salir en la captura
+    property bool editando: false           // superpuesto: estás escribiendo en las notas
+    property string imagenGuia: ""          // la guía como imagen (solo superpuesto)
     readonly property color cian: "#19d9ff"
     readonly property color magenta: "#ff2a9e"
 
@@ -137,6 +148,8 @@ ShellRoot {
             try {
                 pestanas = JSON.parse(texto).filter(p => p.type === "page")
                 asignar()
+                if (raiz.superpuesto && raiz.aLaVista && raiz.imagenGuia === "")
+                    transmitir()
             } catch (e) {}
         })
     }
@@ -149,33 +162,131 @@ ShellRoot {
         const p = pestanaDe(guiaActual)
         if (p)
             pedir("/json/activate/" + p.id, null)
+        if (superpuesto) {
+            imagenGuia = ""
+            transmitir()
+        }
     }
 
-    // Desplazar la guía: una orden por el canal de depuración de la pestaña.
-    property string ordenPendiente: ""
-    function desplazar(cuanto) {
+    // Órdenes a la pestaña de la guía, por su canal de depuración. Si la
+    // guía cambió, se abre el canal de la nueva y lo pendiente de la
+    // anterior se descarta.
+    property var cola: []
+    property int numeroOrden: 10
+    function enviar(metodo, parametros) {
         const p = pestanaDe(guiaActual)
         if (!p || !p.webSocketDebuggerUrl)
             return
-        ordenPendiente = JSON.stringify({ id: 1, method: "Runtime.evaluate",
-            params: { expression: "window.scrollBy({top: " + cuanto + ", behavior: 'smooth'})" } })
-        if (canal.url.toString() === p.webSocketDebuggerUrl && canal.status === WebSocket.Open) {
-            canal.sendTextMessage(ordenPendiente)
-            ordenPendiente = ""
-        } else {
+        const orden = { id: ++numeroOrden, method: metodo, params: parametros || {} }
+        if (canal.url.toString() !== p.webSocketDebuggerUrl) {
+            cola = []
             canal.active = false
             canal.url = p.webSocketDebuggerUrl
             canal.active = true
+        } else if (canal.status !== WebSocket.Open && canal.status !== WebSocket.Connecting) {
+            canal.active = false
+            canal.active = true
+        }
+        if (canal.status === WebSocket.Open)
+            canal.sendTextMessage(JSON.stringify(orden))
+        else
+            cola = cola.concat([orden])
+    }
+
+    function desplazar(cuanto) {
+        enviar("Runtime.evaluate", { expression:
+            "window.scrollBy({top: " + cuanto + ", behavior: '" + (superpuesto ? "instant" : "smooth") + "'})" })
+    }
+
+    // ── Superpuesto: la guía se ve y se usa a distancia ───────────────
+    // No hay ventana de navegador: la página corre sin ventana, transmite
+    // lo que dibuja y recibe de vuelta el ratón y el teclado.
+    property int anchoGuia: 0       // tamaño del espacio donde se dibuja la guía
+    property int altoGuia: 0
+    property bool enGuia: false     // el teclado va a la página (Esc lo devuelve)
+    property real ultimoMovimiento: 0
+
+    function transmitir() {
+        if (!superpuesto || !aLaVista || anchoGuia < 100 || altoGuia < 100 || !pestanaDe(guiaActual))
+            return
+        // La página se dibuja al tamaño exacto del espacio: nítida, y con
+        // el ratón cayendo donde se hace clic.
+        enviar("Emulation.setDeviceMetricsOverride", { width: anchoGuia, height: altoGuia, deviceScaleFactor: 1, mobile: false })
+        enviar("Page.bringToFront")
+        enviar("Page.startScreencast", { format: "jpeg", quality: 78, everyNthFrame: 1 })
+    }
+    onALaVistaChanged: {
+        if (!superpuesto)
+            return
+        if (aLaVista) {
+            transmitir()
+        } else {
+            enGuia = false
+            enviar("Page.stopScreencast")
         }
     }
+    onAnchoGuiaChanged: transmitir()
+    onAltoGuiaChanged: transmitir()
+    // Mientras no llegue la primera imagen (la página todavía carga), se insiste.
+    Timer { interval: 2500; running: raiz.superpuesto && raiz.aLaVista && raiz.imagenGuia === ""; repeat: true; onTriggered: raiz.transmitir() }
+
+    function raton(tipo, x, y, apretado) {
+        enviar("Input.dispatchMouseEvent", {
+            type: tipo, x: Math.round(x), y: Math.round(y),
+            button: tipo === "mouseMoved" ? (apretado ? "left" : "none") : "left",
+            buttons: apretado ? 1 : 0, clickCount: tipo === "mouseMoved" ? 0 : 1 })
+    }
+    function ratonMovido(x, y, apretado) {
+        // Sin apretar basta de vez en cuando (para que la página resalte lo
+        // que hay bajo el puntero); arrastrando, todos los movimientos.
+        const ahora = Date.now()
+        if (!apretado && ahora - ultimoMovimiento < 60)
+            return
+        ultimoMovimiento = ahora
+        raton("mouseMoved", x, y, apretado)
+    }
+    function rueda(x, y, dx, dy) {
+        enviar("Input.dispatchMouseEvent", { type: "mouseWheel", x: Math.round(x), y: Math.round(y), deltaX: -dx, deltaY: -dy })
+    }
+    // Una tecla hacia la página: el texto va tal cual; las de control, por nombre.
+    readonly property var teclasEspeciales: ({
+        [Qt.Key_Backspace]: ["Backspace", 8], [Qt.Key_Tab]: ["Tab", 9], [Qt.Key_Return]: ["Enter", 13],
+        [Qt.Key_Enter]: ["Enter", 13], [Qt.Key_PageUp]: ["PageUp", 33], [Qt.Key_PageDown]: ["PageDown", 34],
+        [Qt.Key_End]: ["End", 35], [Qt.Key_Home]: ["Home", 36], [Qt.Key_Left]: ["ArrowLeft", 37],
+        [Qt.Key_Up]: ["ArrowUp", 38], [Qt.Key_Right]: ["ArrowRight", 39], [Qt.Key_Down]: ["ArrowDown", 40],
+        [Qt.Key_Delete]: ["Delete", 46]
+    })
+    function tecla(codigo, texto) {
+        const especial = teclasEspeciales[codigo]
+        if (especial) {
+            const base = { key: especial[0], code: especial[0], windowsVirtualKeyCode: especial[1], nativeVirtualKeyCode: especial[1] }
+            enviar("Input.dispatchKeyEvent", Object.assign({ type: especial[0] === "Enter" ? "keyDown" : "rawKeyDown" },
+                                                           base, especial[0] === "Enter" ? { text: "\r" } : {}))
+            enviar("Input.dispatchKeyEvent", Object.assign({ type: "keyUp" }, base))
+        } else if (texto !== "" && texto.charCodeAt(0) >= 32) {
+            enviar("Input.insertText", { text: texto })
+        }
+    }
+
     WebSocket {
         id: canal
         active: false
         onStatusChanged: {
-            if (status === WebSocket.Open && raiz.ordenPendiente !== "") {
-                sendTextMessage(raiz.ordenPendiente)
-                raiz.ordenPendiente = ""
+            if (canal.status === WebSocket.Open) {
+                const pendientes = raiz.cola
+                raiz.cola = []
+                pendientes.forEach(orden => sendTextMessage(JSON.stringify(orden)))
             }
+        }
+        onTextMessageReceived: mensaje => {
+            try {
+                const m = JSON.parse(mensaje)
+                if (m.method === "Page.screencastFrame") {
+                    raiz.imagenGuia = "data:image/jpeg;base64," + m.params.data
+                    // Sin este acuse el navegador no manda la imagen siguiente.
+                    raiz.enviar("Page.screencastFrameAck", { sessionId: m.params.sessionId })
+                }
+            } catch (e) {}
         }
     }
 
@@ -228,9 +339,21 @@ ShellRoot {
         if (conCaptura && Quickshell.env("MJC_PANTALLA_JUEGO"))
             orden.push("--captura", Quickshell.env("MJC_PANTALLA_JUEGO"))
         procPreguntar.command = orden
-        procPreguntar.stdinEnabled = true
-        procPreguntar.running = true
+        if (superpuesto && orden.indexOf("--captura") >= 0) {
+            // Va encima del juego: se quita un instante para no salir en la captura.
+            ocultoPorCaptura = true
+            esperaCaptura.start()
+        } else {
+            procPreguntar.stdinEnabled = true
+            procPreguntar.running = true
+        }
     }
+    Timer {
+        id: esperaCaptura
+        interval: 220
+        onTriggered: { procPreguntar.stdinEnabled = true; procPreguntar.running = true; vueltaCaptura.start() }
+    }
+    Timer { id: vueltaCaptura; interval: 900; onTriggered: raiz.ocultoPorCaptura = false }
 
     Process {
         id: procPreguntar
@@ -254,7 +377,15 @@ ShellRoot {
         function anterior(): void { raiz.irA(raiz.guiaActual - 1) }
         function bajar(): void { raiz.desplazar(520) }
         function subir(): void { raiz.desplazar(-520) }
-        function preguntar(): void { raiz.escribiendo = !raiz.escribiendo }
+        function alternar(): void {
+            raiz.aLaVista = !raiz.aLaVista
+            if (!raiz.aLaVista) {
+                raiz.escribiendo = false
+                raiz.editando = false
+                raiz.enGuia = false
+            }
+        }
+        function preguntar(): void { raiz.aLaVista = true; raiz.escribiendo = !raiz.escribiendo }
     }
 
     Component.onCompleted: {
@@ -263,6 +394,21 @@ ShellRoot {
     }
 
     Timer { interval: Math.max(1, raiz.prueba) * 1000; running: raiz.prueba > 0; onTriggered: Qt.quit() }
+    // Solo en modo prueba: un clic, una vuelta de rueda y texto hacia la guía.
+    Timer {
+        interval: 6000
+        running: raiz.prueba > 0 && Quickshell.env("MJC_PRUEBA_ENTRADA") === "1"
+        onTriggered: {
+            // Primero el texto: el clic de después le quita el foco al campo.
+            raiz.tecla(0, "a")
+            raiz.tecla(0, "b")
+            raiz.tecla(0, "c")
+            raiz.tecla(Qt.Key_Backspace, "")
+            raiz.raton("mousePressed", 300, 400, true)
+            raiz.raton("mouseReleased", 300, 400, false)
+            raiz.rueda(300, 400, 0, -360)
+        }
+    }
     // Solo en modo prueba: hace una pregunta sin teclado.
     Timer {
         interval: 400
@@ -273,16 +419,25 @@ ShellRoot {
     PanelWindow {
         id: franja
         screen: Quickshell.screens.find(s => s.name === Quickshell.env("MJC_PANTALLA")) || Quickshell.screens[Quickshell.screens.length - 1]
-        anchors { top: true; bottom: true; left: true }
+        // Con dos pantallas es una franja que le deja el resto al navegador.
+        // Superpuesto cubre la pantalla del juego, pero solo se ve (y solo
+        // recibe clics) donde hay contenido.
+        anchors { top: true; bottom: true; left: true; right: raiz.superpuesto }
         implicitWidth: 460
-        exclusionMode: ExclusionMode.Normal
-        exclusiveZone: implicitWidth        // el navegador ocupa el resto de la pantalla
+        exclusionMode: raiz.superpuesto ? ExclusionMode.Ignore : ExclusionMode.Normal
+        exclusiveZone: raiz.superpuesto ? 0 : implicitWidth
         color: "transparent"
+        visible: raiz.aLaVista && !raiz.ocultoPorCaptura
+        mask: Region { item: contenido }
 
         WlrLayershell.namespace: "modo-juego-companero"
-        WlrLayershell.layer: WlrLayer.Top
-        // Solo toma el teclado cuando vas a preguntar; para las notas basta un clic.
-        WlrLayershell.keyboardFocus: raiz.escribiendo && raiz.prueba === 0 ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.OnDemand
+        WlrLayershell.layer: raiz.superpuesto ? WlrLayer.Overlay : WlrLayer.Top
+        // Toma el teclado solo cuando vas a preguntar o a escribir una nota.
+        // Con dos pantallas, para las notas basta un clic. Superpuesto no
+        // toma nada por su cuenta: mostrarlo no debe sacarte del juego.
+        WlrLayershell.keyboardFocus: raiz.prueba > 0 ? WlrKeyboardFocus.None
+            : (raiz.escribiendo || raiz.editando || raiz.enGuia) ? WlrKeyboardFocus.Exclusive
+            : raiz.superpuesto ? WlrKeyboardFocus.None : WlrKeyboardFocus.OnDemand
 
         component Titulo: Text {
             color: raiz.cian
@@ -296,9 +451,119 @@ ShellRoot {
             Text { text: parent.rotulo; color: "#8a8fa8"; font { family: "Inter Display"; weight: Font.Bold; pixelSize: 10; letterSpacing: 2 } }
         }
 
+        Item {
+            id: contenido
+            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+            width: fondo.width + (visor.visible ? visor.width : 0)
+            opacity: raiz.superpuesto ? raiz.opacidad : 1
+
+            // La guía, en vivo (solo superpuesto): se ve y se usa con el ratón.
+            Rectangle {
+                id: visor
+                visible: raiz.superpuesto && raiz.guias.length > 0
+                anchors { left: parent.left; leftMargin: 460; top: parent.top; bottom: parent.bottom }
+                width: Math.max(0, Math.min(franja.width - 460, Math.round(franja.height * 0.85)))
+                color: "#f5070610"
+                Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: 1; color: Qt.alpha(raiz.cian, 0.45) }
+
+                Text {
+                    id: rotuloGuia
+                    anchors { left: parent.left; top: parent.top; leftMargin: 16; topMargin: 15 }
+                    text: raiz.guias[raiz.guiaActual] ? raiz.guias[raiz.guiaActual].titulo.toUpperCase() : ""
+                    color: raiz.cian
+                    font { family: "Inter Display"; weight: Font.Bold; pixelSize: 12; letterSpacing: 3 }
+                }
+                // Para escribir en la página (el buscador de una wiki) hay que
+                // prestarle el teclado; Esc lo devuelve al juego.
+                Rectangle {
+                    id: botonEscribir
+                    anchors { right: parent.right; top: parent.top; rightMargin: 14; topMargin: 8 }
+                    height: 28; width: textoEscribir.implicitWidth + 26; radius: 14
+                    color: raiz.enGuia ? Qt.alpha(raiz.cian, 0.35) : (zonaEscribir.containsMouse ? "#2effffff" : "#14ffffff")
+                    border.width: 1
+                    border.color: raiz.enGuia ? raiz.cian : "#40ffffff"
+                    Text {
+                        id: textoEscribir
+                        anchors.centerIn: parent
+                        text: raiz.enGuia ? "ESCRIBIENDO EN LA PÁGINA   ·   ESC TERMINA" : "ESCRIBIR EN LA PÁGINA"
+                        color: "#ffffff"
+                        font { family: "Inter Display"; weight: Font.Bold; pixelSize: 11; letterSpacing: 1 }
+                    }
+                    MouseArea {
+                        id: zonaEscribir
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: raiz.enGuia = !raiz.enGuia
+                    }
+                }
+                Text {
+                    anchors { right: botonEscribir.left; rightMargin: 14; verticalCenter: botonEscribir.verticalCenter }
+                    text: "Mod+Alt+C oculta"
+                    color: "#8a8fa8"
+                    font { family: "Inter Display"; pixelSize: 12 }
+                }
+
+                Item {
+                    id: lienzo
+                    anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom
+                              leftMargin: 10; rightMargin: 11; topMargin: 44; bottomMargin: 10 }
+                    // El navegador dibuja la página a este mismo tamaño.
+                    onWidthChanged: raiz.anchoGuia = Math.round(width)
+                    onHeightChanged: raiz.altoGuia = Math.round(height)
+                    Component.onCompleted: { raiz.anchoGuia = Math.round(width); raiz.altoGuia = Math.round(height) }
+                    clip: true
+
+                    Image {
+                        anchors.fill: parent
+                        source: raiz.imagenGuia
+                        fillMode: Image.Stretch
+                        cache: false
+                        // Cada imagen nueva reemplaza a la anterior sin parpadeo.
+                        asynchronous: false
+                    }
+                    Text {
+                        anchors.centerIn: parent
+                        visible: raiz.imagenGuia === ""
+                        text: "Cargando la guía…"
+                        color: "#8a8fa8"
+                        font { family: "Inter Display"; italic: true; pixelSize: 15 }
+                    }
+                    // El ratón sobre la guía va a la página: clic, arrastre y rueda.
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton
+                        onPressed: m => raiz.raton("mousePressed", m.x, m.y, true)
+                        onReleased: m => raiz.raton("mouseReleased", m.x, m.y, false)
+                        onPositionChanged: m => raiz.ratonMovido(m.x, m.y, pressed)
+                        onWheel: w => raiz.rueda(w.x, w.y, w.angleDelta.x, w.angleDelta.y)
+                    }
+                    // Con «escribir en la página» activo, las teclas van a ella.
+                    Item {
+                        id: tecladoGuia
+                        focus: raiz.enGuia
+                        Keys.onPressed: ev => {
+                            if (ev.key === Qt.Key_Escape)
+                                raiz.enGuia = false
+                            else
+                                raiz.tecla(ev.key, ev.text)
+                            ev.accepted = true
+                        }
+                        Connections {
+                            target: raiz
+                            function onEnGuiaChanged() { if (raiz.enGuia) tecladoGuia.forceActiveFocus() }
+                        }
+                    }
+                }
+            }
+        }
+
         Rectangle {
             id: fondo
-            anchors.fill: parent
+            parent: contenido
+            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+            width: 460
             color: "#f5070610"
             Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: 1; color: Qt.alpha(raiz.cian, 0.45) }
 
@@ -306,7 +571,7 @@ ShellRoot {
             Timer {
                 interval: parseInt(Quickshell.env("MJC_FOTO_MS") || "1600")
                 running: raiz.prueba > 0 && !!Quickshell.env("MJC_FOTO")
-                onTriggered: fondo.grabToImage(r => r.saveToFile(Quickshell.env("MJC_FOTO")))
+                onTriggered: contenido.grabToImage(r => r.saveToFile(Quickshell.env("MJC_FOTO")))
             }
 
             Column {
@@ -393,6 +658,7 @@ ShellRoot {
                         width: parent.width
                         text: raiz.guias.length === 0 ? "Este juego no tiene guías configuradas."
                               : "Mod+Alt+← →  cambia de guía     Mod+Alt+↑ ↓  la desplaza"
+                                + (raiz.superpuesto ? "     Mod+Alt+C  oculta todo" : "")
                         color: "#8a8fa8"
                         wrapMode: Text.WordWrap
                         font { family: "Inter Display"; pixelSize: 12 }
@@ -427,13 +693,22 @@ ShellRoot {
                             font { family: "Inter Display"; pixelSize: 15 }
                             // Se guarda sola un momento después de dejar de escribir.
                             onTextChanged: if (activeFocus) esperaNotas.restart()
-                            Keys.onEscapePressed: focus = false
+                            Keys.onEscapePressed: { focus = false; raiz.editando = false }
                         }
+                    }
+                    // Superpuesto, el primer clic sobre las notas pide el teclado
+                    // (Esc lo devuelve al juego).
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: raiz.superpuesto && !raiz.editando
+                        cursorShape: Qt.IBeamCursor
+                        onClicked: { raiz.editando = true; notas.forceActiveFocus() }
                     }
                     Text {
                         anchors { left: parent.left; top: parent.top; margins: 12 }
                         visible: notas.text === "" && !notas.activeFocus
-                        text: "Haz clic y escribe: jefes pendientes, dónde quedaste…"
+                        text: raiz.superpuesto ? "Haz clic y escribe; Esc vuelve al juego."
+                                               : "Haz clic y escribe: jefes pendientes, dónde quedaste…"
                         color: "#7d8299"
                         font { family: "Inter Display"; pixelSize: 14 }
                     }
@@ -564,6 +839,37 @@ ShellRoot {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Superpuesto parte oculto: un aviso chico, unos segundos, dice que
+    // está listo y con qué atajo se ve.
+    PanelWindow {
+        screen: franja.screen
+        anchors { top: true; left: true }
+        margins { top: 24; left: 24 }
+        implicitWidth: pista.implicitWidth + 36
+        implicitHeight: 40
+        exclusionMode: ExclusionMode.Ignore
+        color: "transparent"
+        visible: raiz.superpuesto && raiz.prueba === 0 && !raiz.aLaVista && raiz.segundos < 7
+        mask: Region {}
+        WlrLayershell.namespace: "modo-juego-companero-aviso"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+        Rectangle {
+            anchors.fill: parent
+            radius: height / 2
+            color: "#e6070610"
+            border.width: 1
+            border.color: Qt.alpha(raiz.cian, 0.6)
+            Text {
+                id: pista
+                anchors.centerIn: parent
+                text: "Compañero listo   ·   Mod+Alt+C lo muestra y lo oculta"
+                color: "#ffffff"
+                font { family: "Inter Display"; weight: Font.DemiBold; pixelSize: 14 }
             }
         }
     }

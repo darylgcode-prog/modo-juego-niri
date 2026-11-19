@@ -186,9 +186,17 @@ FocusScope {
                     font { family: "Inter Display"; weight: Font.Black; italic: true; pixelSize: 36 * panel.u; letterSpacing: 2 * panel.u }
                 }
                 Boton {
+                    id: botonCerrar
                     anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                     texto: "ESC   CERRAR"
                     onPulsado: panel.cerrar()
+                }
+                Text {
+                    anchors { right: botonCerrar.left; rightMargin: 18 * panel.u; verticalCenter: parent.verticalCenter }
+                    visible: (panel.ajustes.version || "") !== ""
+                    text: "Versión " + (panel.ajustes.version || "") + "   ·   se actualiza con «modo-juego actualizar»"
+                    color: "#7d8299"
+                    font { family: "Inter Display"; pixelSize: 13 * panel.u }
                 }
             }
 
@@ -455,8 +463,8 @@ FocusScope {
                     onCambiado: nuevo => panel.ponerAjuste("VOLVER_AL_LANZADOR", nuevo)
                 }
                 Interruptor {
-                    texto: "Compañero en el segundo monitor"
-                    detalle: (panel.ajustes.pantallas || 1) < 2 ? "Ahora hay una sola pantalla encendida: no tiene dónde abrirse."
+                    texto: "Compañero de juego"
+                    detalle: (panel.ajustes.pantallas || 1) < 2 ? "Con una sola pantalla va encima del juego: Mod+Alt+C lo muestra y lo oculta."
                              : "Guías, notas, sesión y asistente en la pantalla que no usa el juego."
                     valor: panel.ajustes.companero === true
                     onCambiado: nuevo => panel.ponerAjuste("COMPANERO", nuevo)

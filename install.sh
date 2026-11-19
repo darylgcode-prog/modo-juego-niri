@@ -6,6 +6,8 @@
 #   ./install.sh --sin-dependencias no instala paquetes: solo dice qué falta
 #   ./install.sh --asistente        además prepara el asistente con IA (crea un
 #                                   entorno de Python y baja el paquete de Anthropic)
+#   ./install.sh --actualizar       baja la última versión del repositorio y la instala
+#                                   (lo mismo que hace «modo-juego actualizar»)
 #
 # Los programas van a tu carpeta personal, sin sudo. Lo único que pide tu
 # contraseña es instalar paquetes del sistema, y solo si dices que sí.
@@ -18,19 +20,48 @@ BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 DATOS="${XDG_DATA_HOME:-$HOME/.local/share}"
 CON_ASISTENTE=no
+ACTUALIZAR=no
 DEPENDENCIAS=preguntar      # preguntar | si | no
+RESTO=()
 
 for arg in "$@"; do
+  [[ $arg == --actualizar ]] || RESTO+=("$arg")
   case $arg in
+    --actualizar) ACTUALIZAR=si ;;
     --asistente) CON_ASISTENTE=si ;;
     --si) DEPENDENCIAS=si ;;
     --sin-dependencias) DEPENDENCIAS=no ;;
-    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "No conozco la opción «$arg». Prueba con --help." >&2; exit 2 ;;
   esac
 done
 
 hay() { command -v "$1" >/dev/null 2>&1; }
+
+# ── Actualizar: traer lo nuevo y seguir con el instalador que llegó ──
+if [[ $ACTUALIZAR = si ]]; then
+  if ! hay git || [[ ! -d $AQUI/.git ]]; then
+    echo "Esta carpeta no es un repositorio de git: no puedo traer lo nuevo." >&2
+    echo "Baja la última versión del proyecto y ejecuta su ./install.sh" >&2
+    exit 1
+  fi
+  antes=$(git -C "$AQUI" rev-parse --short HEAD)
+  echo "== Buscando lo nuevo =="
+  if ! git -C "$AQUI" pull --ff-only; then
+    echo "No pude traer lo nuevo (mira el mensaje de git arriba). No cambié nada." >&2
+    exit 1
+  fi
+  despues=$(git -C "$AQUI" rev-parse --short HEAD)
+  if [[ $antes == "$despues" ]]; then
+    echo "Ya tenías lo último ($despues). Reinstalo igual, por si lo instalado quedó atrás."
+  else
+    echo "De $antes a $despues:"
+    git -C "$AQUI" log --format='  · %s' "$antes..$despues"
+  fi
+  echo
+  # El propio instalador pudo cambiar: se sigue con el que acaba de llegar.
+  exec "$AQUI/install.sh" ${RESTO[@]+"${RESTO[@]}"}
+fi
 
 # ── Con qué se instalan paquetes en este sistema ─────────────────────
 GESTOR=''
@@ -216,11 +247,30 @@ echo "  config.sh.ejemplo (cópialo a config.sh para cambiar qué se cierra)"
 
 if [[ -d $CONFIG/niri ]]; then
   if [[ -e $CONFIG/niri/modo-juego.kdl ]]; then
-    echo "== Atajos de niri: $CONFIG/niri/modo-juego.kdl ya existe, se deja como está =="
+    if cmp -s "$AQUI/niri/modo-juego.kdl" "$CONFIG/niri/modo-juego.kdl"; then
+      echo "== Atajos de niri: al día =="
+    else
+      # El tuyo puede tener cambios propios: no se pisa. El de esta versión
+      # queda al lado, por si trae atajos nuevos que quieras copiar.
+      cp "$AQUI/niri/modo-juego.kdl" "$CONFIG/niri/modo-juego.kdl.nuevo"
+      echo "== Atajos de niri: tu modo-juego.kdl es distinto del de esta versión =="
+      echo "  Se deja como está. El de esta versión quedó al lado, como modo-juego.kdl.nuevo:"
+      echo "  mira si trae atajos nuevos que quieras copiar."
+    fi
   else
     cp "$AQUI/niri/modo-juego.kdl" "$CONFIG/niri/modo-juego.kdl"
     echo "== Atajos de niri → $CONFIG/niri/modo-juego.kdl =="
   fi
+fi
+
+# De dónde se instaló y qué versión es: lo usan «modo-juego actualizar» y
+# la pantalla de Ajustes.
+mkdir -p "$DATOS/modo-juego"
+echo "$AQUI" >"$DATOS/modo-juego/origen"
+if hay git && [[ -d $AQUI/.git ]]; then
+  git -C "$AQUI" log -1 --format='%h del %cs' >"$DATOS/modo-juego/version" 2>/dev/null || rm -f "$DATOS/modo-juego/version"
+else
+  rm -f "$DATOS/modo-juego/version"
 fi
 
 if [[ $CON_ASISTENTE = si ]]; then
@@ -248,5 +298,6 @@ if [[ -d $CONFIG/niri ]] && ! grep -qs 'modo-juego.kdl' "$CONFIG/niri/config.kdl
   echo "  · Agrega esta línea a $CONFIG/niri/config.kdl para tener los atajos:"
   echo '        include "modo-juego.kdl"'
 fi
+echo "  · Para actualizar más adelante:                     modo-juego actualizar"
 echo "  · Mira qué cerraría en tu equipo, sin tocar nada:   modo-juego simular"
 echo "  · Mira la entrada y el lanzador, sin cerrar nada:   modo-juego animacion"
