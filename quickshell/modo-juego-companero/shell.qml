@@ -204,6 +204,7 @@ ShellRoot {
     property int anchoGuia: 0       // tamaño del espacio donde se dibuja la guía
     property int altoGuia: 0
     property bool enGuia: false     // el teclado va a la página (Esc lo devuelve)
+    property int cuadros: 0         // imágenes recibidas (para medir en las pruebas)
     property real ultimoMovimiento: 0
 
     function transmitir() {
@@ -282,6 +283,7 @@ ShellRoot {
             try {
                 const m = JSON.parse(mensaje)
                 if (m.method === "Page.screencastFrame") {
+                    raiz.cuadros++
                     raiz.imagenGuia = "data:image/jpeg;base64," + m.params.data
                     // Sin este acuse el navegador no manda la imagen siguiente.
                     raiz.enviar("Page.screencastFrameAck", { sessionId: m.params.sessionId })
@@ -409,6 +411,19 @@ ShellRoot {
             raiz.rueda(300, 400, 0, -360)
         }
     }
+    // Solo en modo prueba: pasea el puntero por la guía, como haría una mano.
+    Timer {
+        property int paso: 0
+        interval: 30
+        repeat: true
+        running: raiz.prueba > 0 && Quickshell.env("MJC_PRUEBA_PASEO") === "1" && raiz.imagenGuia !== ""
+        onTriggered: {
+            paso++
+            raiz.raton("mouseMoved", 120 + (paso * 9) % 700, 140 + (paso * 5) % 800, false)
+            if (paso % 25 === 0)
+                raiz.rueda(400, 500, 0, paso % 50 === 0 ? 240 : -240)
+        }
+    }
     // Solo en modo prueba: hace una pregunta sin teclado.
     Timer {
         interval: 400
@@ -514,13 +529,93 @@ ShellRoot {
                     Component.onCompleted: { raiz.anchoGuia = Math.round(width); raiz.altoGuia = Math.round(height) }
                     clip: true
 
+                    // Dos capas que se turnan. La imagen nueva carga en la de
+                    // atrás y pasa al frente recién cuando está lista: si se
+                    // cambiara en el mismo recuadro, quedaría vacío un instante
+                    // cada vez, y con el puntero encima eso es un parpadeo
+                    // continuo. Si llegan imágenes más rápido de lo que cargan,
+                    // se salta a la más nueva.
+                    property int frente: 0          // 0 = capaA, 1 = capaB
+                    property bool cargando: false
+                    property string enEspera: ""
+
+                    function poner(datos) {
+                        if (cargando) {
+                            enEspera = datos
+                            return
+                        }
+                        cargando = true
+                        if (frente === 0) capaB.source = datos
+                        else capaA.source = datos
+                    }
+                    function lista(cual) {
+                        frente = cual
+                        cargando = false
+                        if (enEspera !== "") {
+                            const datos = enEspera
+                            enEspera = ""
+                            poner(datos)
+                        }
+                    }
+                    function fallo() {
+                        cargando = false
+                        enEspera = ""
+                    }
+                    Connections {
+                        target: raiz
+                        function onImagenGuiaChanged() {
+                            if (raiz.imagenGuia !== "") {
+                                lienzo.poner(raiz.imagenGuia)
+                            } else {
+                                // Otra guía: se limpia para mostrar «Cargando».
+                                lienzo.cargando = false
+                                lienzo.enEspera = ""
+                                capaA.source = ""
+                                capaB.source = ""
+                            }
+                        }
+                    }
                     Image {
+                        id: capaA
                         anchors.fill: parent
-                        source: raiz.imagenGuia
+                        z: lienzo.frente === 0 ? 1 : 0
                         fillMode: Image.Stretch
                         cache: false
-                        // Cada imagen nueva reemplaza a la anterior sin parpadeo.
-                        asynchronous: false
+                        onStatusChanged: {
+                            if (status === Image.Ready && lienzo.cargando && lienzo.frente === 1) lienzo.lista(0)
+                            else if (status === Image.Error) lienzo.fallo()
+                        }
+                    }
+                    Image {
+                        id: capaB
+                        anchors.fill: parent
+                        z: lienzo.frente === 1 ? 1 : 0
+                        fillMode: Image.Stretch
+                        cache: false
+                        onStatusChanged: {
+                            if (status === Image.Ready && lienzo.cargando && lienzo.frente === 0) lienzo.lista(1)
+                            else if (status === Image.Error) lienzo.fallo()
+                        }
+                    }
+                    // Solo en modo prueba: mide si la capa del frente queda
+                    // alguna vez sin imagen (eso es lo que se vería parpadear).
+                    property int muestras: 0
+                    property int enBlanco: 0
+                    Timer {
+                        interval: 8
+                        repeat: true
+                        running: raiz.prueba > 0 && raiz.imagenGuia !== ""
+                        onTriggered: {
+                            const delFrente = lienzo.frente === 0 ? capaA : capaB
+                            lienzo.muestras++
+                            if (delFrente.status !== Image.Ready)
+                                lienzo.enBlanco++
+                        }
+                    }
+                    Timer {
+                        interval: Math.max(500, raiz.prueba * 1000 - 600)
+                        running: raiz.prueba > 0
+                        onTriggered: console.warn("PARPADEO muestras=" + lienzo.muestras + " en-blanco=" + lienzo.enBlanco + " imagenes-recibidas=" + raiz.cuadros)
                     }
                     Text {
                         anchors.centerIn: parent
