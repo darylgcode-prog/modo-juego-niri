@@ -40,6 +40,24 @@ FocusScope {
     signal quitarClaveIa()
     signal ponerModelo(string nombre)
 
+    // Trucos del juego elegido (F3), para los emuladores que se pueden manejar.
+    property bool trucosAbiertos: false
+    property var trucos: ({})
+    property string errorTruco: ""
+    property bool trucosOcupado: false
+    signal pedirTrucos(string id)
+    signal ponerTruco(string clave, bool activo, string opcion)
+    readonly property bool hayTrucos: actual !== null && actual.trucos === true
+
+    function abrirTrucos() {
+        if (!hayTrucos)
+            return
+        trucosAbiertos = true
+        pedirTrucos(actual.id)
+        panelTrucos.enfocar()
+    }
+    function cerrarTrucos() { trucosAbiertos = false; lanz.forceActiveFocus() }
+
     function abrirAjustes() { ajustesAbiertos = true; panelAjustes.enfocar() }
     function cerrarAjustes() { ajustesAbiertos = false; lanz.forceActiveFocus() }
 
@@ -89,6 +107,10 @@ FocusScope {
 
     // Una acción, venga del teclado o del mando.
     function accion(cual) {
+        if (trucosAbiertos) {
+            panelTrucos.accion(cual)
+            return
+        }
         if (ajustesAbiertos) {
             if (cual === "atras" || cual === "menu")
                 cerrarAjustes()
@@ -140,6 +162,9 @@ FocusScope {
 
     focus: true
     Keys.onPressed: ev => {
+        // Con los trucos abiertos, todas las teclas son del panel.
+        if (trucosAbiertos)
+            return
         // Con los ajustes abiertos las teclas son suyas: aquí solo llega
         // lo que no usaron, y de eso solo importa Esc.
         if (ajustesAbiertos) {
@@ -160,6 +185,7 @@ FocusScope {
         case Qt.Key_Escape: accion("atras"); break
         case Qt.Key_F10: salirModo(); break
         case Qt.Key_F2: accion("menu"); break
+        case Qt.Key_F3: abrirTrucos(); break
         default: return
         }
         ev.accepted = true
@@ -486,7 +512,32 @@ FocusScope {
             }
         }
 
+        // Solo cuando el juego elegido tiene trucos que se pueden manejar.
         Rectangle {
+            visible: lanz.hayTrucos
+            anchors { right: botonAjustes.left; rightMargin: 12 * lanz.u; verticalCenter: parent.verticalCenter }
+            height: 40 * lanz.u; width: txTrucos.implicitWidth + 40 * lanz.u; radius: height / 2
+            color: zonaTrucos.containsMouse ? Qt.alpha(lanz.magenta, 0.3) : Qt.alpha(lanz.magenta, 0.12)
+            border.color: zonaTrucos.containsMouse ? lanz.magenta : Qt.alpha(lanz.magenta, 0.6); border.width: 1
+            Behavior on color { ColorAnimation { duration: 140 } }
+            Text {
+                id: txTrucos
+                anchors.centerIn: parent
+                text: "F3   TRUCOS"
+                color: "#ffffff"
+                font { family: "Inter Display"; weight: Font.Bold; pixelSize: 14 * lanz.u; letterSpacing: 1.5 * lanz.u }
+            }
+            MouseArea {
+                id: zonaTrucos
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: lanz.abrirTrucos()
+            }
+        }
+
+        Rectangle {
+            id: botonAjustes
             anchors { right: botonSalir.left; rightMargin: 12 * lanz.u; verticalCenter: parent.verticalCenter }
             height: 40 * lanz.u; width: txAjustes.implicitWidth + 40 * lanz.u; radius: height / 2
             color: zonaAjustes.containsMouse ? Qt.alpha(lanz.cian, 0.3) : "#14ffffff"
@@ -530,6 +581,22 @@ FocusScope {
                 onClicked: lanz.salirModo()
             }
         }
+    }
+
+    // ── Trucos (encima de todo) ───────────────────────────────────────
+    Trucos {
+        id: panelTrucos
+        anchors.fill: parent
+        z: 11
+        u: lanz.u
+        visible: opacity > 0
+        opacity: lanz.trucosAbiertos ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 180 } }
+        datos: lanz.trucos
+        error: lanz.errorTruco
+        ocupado: lanz.trucosOcupado
+        onCerrar: lanz.cerrarTrucos()
+        onPoner: (clave, activo, opcion) => lanz.ponerTruco(clave, activo, opcion)
     }
 
     // ── Ajustes (encima de todo) ──────────────────────────────────────

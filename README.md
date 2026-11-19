@@ -38,6 +38,9 @@ los programas que cerró y muestra un resumen de la sesión.
 - Baja carátulas, fondos y logos de Steam, y de SteamGridDB para lo que
   Steam no tiene (pide una clave gratuita).
 - Recuerda lo último que jugaste y cuántas horas llevas.
+- **Trucos de emulador:** con `F3` sobre un juego de Wii U se encienden y
+  apagan los trucos que Cemu trae para él (los paquetes de la categoría
+  *Cheats*), sin abrir Cemu.
 - Se maneja con teclado, ratón o mando.
 
 **El compañero de juego**
@@ -167,7 +170,8 @@ sirva. La versión instalada se ve con `modo-juego version` y en Ajustes.
 | `Mod+Alt+P` | Compañero: pregunta al asistente |
 
 En el lanzador: flechas para moverse, `Enter` para lanzar, `Esc` para
-cerrar, `F2` para los ajustes y `F10` para salir del modo juego.
+cerrar, `F2` para los ajustes, `F3` para los trucos (si el juego los tiene) y
+`F10` para salir del modo juego.
 
 ## Configuración
 
@@ -203,6 +207,18 @@ En `roms.conf` indicas una carpeta, y dentro va una subcarpeta por consola:
 
 El emulador tiene que estar instalado y aparecer en el menú de aplicaciones.
 Este proyecto no incluye juegos, ROMs ni arte de juegos.
+
+### Trucos
+
+Por ahora solo para Cemu (Wii U). Los trucos son los «paquetes gráficos» de
+la categoría *Cheats* que vienen en los paquetes de la comunidad; si un juego
+no muestra ninguno, bájalos desde Cemu (Opciones → Paquetes gráficos →
+Descargar los paquetes de la comunidad). `F3` en el lanzador los lista y los
+enciende o apaga; los que traen variantes (como el multiplicador de
+durabilidad) se cambian con las flechas. Valen la próxima vez que abras el
+juego y Cemu tiene que estar cerrado. Antes del primer cambio queda una copia
+de la configuración de Cemu en `settings.xml.antes-de-trucos`. Los nombres y
+descripciones salen de los propios paquetes, en inglés.
 
 ### Agregar un juego suelto
 

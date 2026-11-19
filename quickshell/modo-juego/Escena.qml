@@ -61,6 +61,11 @@ Item {
         animSalida.start()
     }
 
+    function abrirTrucos() {
+        if (fase === "lanzador" && cargaLanzador.item)
+            cargaLanzador.item.abrirTrucos()
+    }
+
     function accionMando(cual) {
         if (fase === "lanzador" && cargaLanzador.item)
             cargaLanzador.item.accion(cual)
@@ -323,6 +328,11 @@ Item {
                 onGuardarClaveIa: texto => esc.centro.guardarClaveIa(texto)
                 onQuitarClaveIa: esc.centro.quitarClaveIa()
                 onPonerModelo: nombre => esc.centro.ponerModelo(nombre)
+                trucos: esc.centro.trucos
+                errorTruco: esc.centro.errorTruco
+                trucosOcupado: esc.centro.trucosOcupado
+                onPedirTrucos: id => esc.centro.pedirTrucos(id)
+                onPonerTruco: (clave, activo, opcion) => esc.centro.ponerTruco(clave, activo, opcion)
                 onActivoChanged: if (activo && esc.centro.abrirEnAjustes) abrirAjustes()
             }
         }

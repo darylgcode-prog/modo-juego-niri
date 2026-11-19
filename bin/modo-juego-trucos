@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Trucos de los juegos de emulador, para el lanzador del modo juego.
+
+Enciende y apaga los trucos que el propio emulador ya trae para un juego,
+sin tener que abrirlo. Los cambios valen la próxima vez que se abre el juego.
+
+  modo-juego-trucos listar <id>                      los trucos de ese juego, en JSON
+  modo-juego-trucos poner <id> <clave> si|no         enciende o apaga uno
+  modo-juego-trucos poner <id> <clave> si --opcion "x2"   y elige una variante
+
+<id> es el del juego en el catálogo del lanzador.
+
+Emuladores que sabe manejar:
+  Cemu (Wii U)   los trucos son «paquetes gráficos» de la categoría Cheats.
+                 Vienen en los paquetes de la comunidad, que se bajan desde
+                 Cemu (Opciones → Paquetes gráficos → Descargar). Este
+                 programa solo los activa en settings.xml; de la primera vez
+                 queda una copia en settings.xml.antes-de-trucos.
+"""
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from xml.sax.saxutils import escape, quoteattr
+
+CASA = os.path.expanduser("~")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", f"{CASA}/.cache"), "modo-juego")
+CATALOGO = os.path.join(CACHE, "catalogo.json")
+# Las carpetas de Cemu se pueden cambiar (sirve para probar sin tocar la configuración real).
+CEMU_CONFIG = os.environ.get("MODO_JUEGO_CEMU_CONFIG",
+                             os.path.join(os.environ.get("XDG_CONFIG_HOME", f"{CASA}/.config"), "Cemu"))
+CEMU_DATOS = os.environ.get("MODO_JUEGO_CEMU_DATOS",
+                            os.path.join(os.environ.get("XDG_DATA_HOME", f"{CASA}/.local/share"), "Cemu"))
+
+
+def buscar_juego(ident):
+    try:
+        with open(CATALOGO, encoding="utf-8") as f:
+            catalogo = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for fila in ("juegos", "emuladores", "lanzadores"):
+        for item in catalogo.get(fila, []):
+            if item.get("id") == ident:
+                return item
+    return None
+
+
+# ── Cemu ─────────────────────────────────────────────────────────────
+
+def cemu_titulo(item):
+    """Identificador del juego de Wii U (16 hexadecimales), o ''."""
+    m = re.search(r"'([^']+\.(?:rpx|wua|wux|wud))'", item.get("cmd", ""), re.I)
+    ruta = m.group(1) if m else ""
+    if ruta.lower().endswith(".rpx"):
+        meta = os.path.join(os.path.dirname(os.path.dirname(ruta)), "meta", "meta.xml")
+        try:
+            texto = open(meta, encoding="utf-8", errors="replace").read()
+            t = re.search(r"<title_id[^>]*>\s*([0-9A-Fa-f]{16})", texto)
+            if t:
+                return t.group(1).lower()
+        except OSError:
+            pass
+    # El nombre de la carpeta o del archivo suele traerlo entre corchetes.
+    t = re.search(r"\[([0-9A-Fa-f]{16})\]", ruta)
+    if t:
+        return t.group(1).lower()
+    # Último recurso: la lista de juegos que guarda Cemu.
+    try:
+        lista = open(os.path.join(CEMU_DATOS, "title_list_cache.xml"), encoding="utf-8", errors="replace").read()
+        for bloque in re.findall(r"<title\b.*?</title>", lista, re.S):
+            if ruta and os.path.dirname(os.path.dirname(ruta)) in bloque or (ruta and ruta in bloque):
+                t = re.search(r'titleId="([0-9A-Fa-f]{16})"|<title_id>([0-9A-Fa-f]{16})', bloque)
+                if t:
+                    return (t.group(1) or t.group(2)).lower()
+    except OSError:
+        pass
+    return ""
+
+
+def cemu_leer_paquete(ruta_reglas):
+    """Lee un rules.txt: su definición y sus variantes."""
+    try:
+        lineas = open(ruta_reglas, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return None
+    seccion, definicion, variantes, actual = "", {}, [], None
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea or linea.startswith(("#", ";")):
+            continue
+        if linea.startswith("["):
+            seccion = linea.strip("[]").lower()
+            if seccion == "preset":
+                actual = {}
+                variantes.append(actual)
+            continue
+        if "=" not in linea:
+            continue
+        clave, valor = (x.strip() for x in linea.split("=", 1))
+        valor = valor.strip('"')
+        if seccion == "definition":
+            definicion[clave] = valor
+        elif seccion == "preset" and actual is not None and not clave.startswith("$"):
+            actual[clave] = valor
+    return definicion, variantes
+
+
+def cemu_paquetes(titulo):
+    """Los trucos de Cemu para ese juego: paquetes de la categoría Cheats."""
+    base = os.path.join(CEMU_DATOS, "graphicPacks")
+    encontrados = []
+    for reglas in sorted(glob.glob(os.path.join(glob.escape(base), "**", "rules.txt"), recursive=True)):
+        leido = cemu_leer_paquete(reglas)
+        if not leido:
+            continue
+        definicion, variantes = leido
+        ids = [x.strip().lower() for x in definicion.get("titleIds", "").split(",")]
+        partes = [p.strip().lower() for p in definicion.get("path", "").split("/")]
+        if titulo not in ids or "cheats" not in partes:
+            continue
+        categorias = list(dict.fromkeys(v.get("category", "") for v in variantes))
+        # Se ofrecen las variantes solo cuando son una sola lista para elegir;
+        # los paquetes con varias listas se activan con lo que traen por defecto.
+        opciones, por_defecto = [], ""
+        if variantes and len(categorias) == 1:
+            opciones = [v.get("name", "") for v in variantes if v.get("name")]
+            por_defecto = next((v.get("name", "") for v in variantes if v.get("default") == "1"), opciones[0] if opciones else "")
+        encontrados.append({
+            "clave": os.path.relpath(os.path.dirname(reglas), base),
+            "archivo": "graphicPacks/" + os.path.relpath(reglas, base).replace(os.sep, "/"),
+            "nombre": definicion.get("name", os.path.basename(os.path.dirname(reglas))),
+            # La descripción trae los créditos después de «||».
+            "descripcion": definicion.get("description", "").split("||")[0].strip(),
+            "categoria": categorias[0] if len(categorias) == 1 else "",
+            "opciones": opciones,
+            "por_defecto": por_defecto,
+            "varias_listas": len(categorias) > 1,
+        })
+    return encontrados
+
+
+def cemu_entrada(texto, archivo):
+    """El trozo de settings.xml que activa ese paquete, o None."""
+    patron = re.compile(r'[ \t]*<Entry filename=' + re.escape(quoteattr(archivo)) + r'\s*(?:/>|>.*?</Entry>)[ \t]*\n?', re.S)
+    return patron.search(texto)
+
+
+def cemu_leer_config():
+    try:
+        return open(os.path.join(CEMU_CONFIG, "settings.xml"), encoding="utf-8").read()
+    except OSError:
+        return None
+
+
+def cemu_abierto():
+    return subprocess.run(["pgrep", "-xi", "cemu"], capture_output=True).returncode == 0
+
+
+def cemu_listar(item):
+    titulo = cemu_titulo(item)
+    if not titulo:
+        return {"disponible": False, "motivo": "No pude saber qué juego de Wii U es.", "trucos": []}
+    paquetes = cemu_paquetes(titulo)
+    if not paquetes:
+        return {"disponible": False, "trucos": [],
+                "motivo": "Cemu no tiene trucos para este juego. Se bajan desde Cemu: Opciones → Paquetes gráficos → "
+                          "Descargar los paquetes de la comunidad."}
+    config = cemu_leer_config()
+    if config is None:
+        return {"disponible": False, "motivo": "No encuentro la configuración de Cemu.", "trucos": []}
+    trucos = []
+    for p in paquetes:
+        entrada = cemu_entrada(config, p["archivo"])
+        opcion = ""
+        if entrada and p["opciones"]:
+            elegido = re.search(r"<preset>(.*?)</preset>", entrada.group(0), re.S)
+            opcion = elegido.group(1).strip() if elegido else p["por_defecto"]
+            opcion = (opcion.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"))
+        trucos.append({
+            "clave": p["clave"], "nombre": p["nombre"], "descripcion": p["descripcion"],
+            "activo": entrada is not None, "opciones": p["opciones"],
+            "opcion": opcion or p["por_defecto"], "varias_listas": p["varias_listas"],
+        })
+    return {"disponible": True, "emulador": "Cemu", "trucos": trucos,
+            "nota": "Valen la próxima vez que abras el juego." + (" Cemu está abierto: ciérralo para poder cambiarlos." if cemu_abierto() else "")}
+
+
+def cemu_poner(item, clave, activo, opcion):
+    if cemu_abierto():
+        return "Cemu está abierto y guarda su configuración al cerrarse: ciérralo y vuelve a intentarlo."
+    paquete = next((p for p in cemu_paquetes(cemu_titulo(item)) if p["clave"] == clave), None)
+    if not paquete:
+        return "Ese truco no existe para este juego."
+    ruta = os.path.join(CEMU_CONFIG, "settings.xml")
+    config = cemu_leer_config()
+    if config is None:
+        return "No encuentro la configuración de Cemu."
+    # Copia de la configuración tal como estaba antes del primer cambio.
+    respaldo = ruta + ".antes-de-trucos"
+    if not os.path.exists(respaldo):
+        shutil.copy2(ruta, respaldo)
+
+    existente = cemu_entrada(config, paquete["archivo"])
+    if existente:
+        config = config[:existente.start()] + config[existente.end():]
+    if activo:
+        sangria = "        "
+        if paquete["opciones"]:
+            elegida = opcion if opcion in paquete["opciones"] else paquete["por_defecto"]
+            entrada = (f'{sangria}<Entry filename={quoteattr(paquete["archivo"])}>\n'
+                       f'{sangria}    <Preset>\n'
+                       f'{sangria}        <category>{escape(paquete["categoria"])}</category>\n'
+                       f'{sangria}        <preset>{escape(elegida)}</preset>\n'
+                       f'{sangria}    </Preset>\n'
+                       f'{sangria}</Entry>\n')
+        else:
+            entrada = f'{sangria}<Entry filename={quoteattr(paquete["archivo"])}/>\n'
+        cierre = re.search(r"[ \t]*</GraphicPack>", config)
+        if cierre:
+            config = config[:cierre.start()] + entrada + config[cierre.start():]
+        elif re.search(r"<GraphicPack\s*/>", config):
+            config = re.sub(r"([ \t]*)<GraphicPack\s*/>",
+                            lambda m: f"{m.group(1)}<GraphicPack>\n{entrada}{m.group(1)}</GraphicPack>", config, count=1)
+        else:
+            return "La configuración de Cemu no tiene la sección de paquetes gráficos: ábrelo una vez y ciérralo."
+    with open(ruta + ".tmp", "w", encoding="utf-8") as f:
+        f.write(config)
+    os.replace(ruta + ".tmp", ruta)
+    return ""
+
+
+# ── Entrada ──────────────────────────────────────────────────────────
+
+MANEJADORES = {"Wii U": (cemu_listar, cemu_poner)}
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 2 or args[0] not in ("listar", "poner"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    item = buscar_juego(args[1])
+    if not item:
+        print(json.dumps({"disponible": False, "motivo": "No encuentro ese juego en el catálogo.", "trucos": []},
+                         ensure_ascii=False))
+        return 1
+    manejador = MANEJADORES.get(item.get("sistema", ""))
+    if args[0] == "listar":
+        if not manejador:
+            resultado = {"disponible": False, "trucos": [],
+                         "motivo": "Los trucos de este emulador todavía se manejan desde el propio emulador."}
+        else:
+            resultado = manejador[0](item)
+        resultado["juego"] = item.get("nombre", "")
+        print(json.dumps(resultado, ensure_ascii=False))
+        return 0
+    if len(args) < 4 or args[3] not in ("si", "no"):
+        print("Uso: modo-juego-trucos poner <id> <clave> si|no [--opcion \"nombre\"]", file=sys.stderr)
+        return 2
+    if not manejador:
+        print("Este emulador no se maneja desde aquí.")
+        return 1
+    opcion = args[args.index("--opcion") + 1] if "--opcion" in args and args.index("--opcion") + 1 < len(args) else ""
+    error = manejador[1](item, args[2], args[3] == "si", opcion)
+    if error:
+        print(error)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

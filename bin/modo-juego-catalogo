@@ -258,6 +258,8 @@ SISTEMAS = {
     "3ds": ("3DS", ["3ds", "n3ds"], ["azahar"], "-f {rom}", [".3ds", ".cci", ".cxi", ".3dsx", ".zcci"]),
 }
 ROMS_CONF = os.path.join(CONFIG, "roms.conf")
+# Consolas cuyo emulador sabe manejar «modo-juego-trucos».
+SISTEMAS_CON_TRUCOS = {"wiiu"}
 
 
 def leer_roms_conf():
@@ -362,6 +364,8 @@ def roms(emuladores):
                         "fondo": imagen_de(FONDOS, clave) or fondo,
                         "logo": imagen_de(LOGOS, clave),
                         "steam": "",
+                        # Sus trucos se pueden encender desde el lanzador (modo-juego-trucos).
+                        "trucos": sistema in SISTEMAS_CON_TRUCOS,
                         "cmd": f"{emulador['cmd']} {args.format(rom=shlex.quote(ruta))}",
                     }
 
