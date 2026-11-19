@@ -80,11 +80,8 @@ puede hacer falta ajustar cosas; los reportes son bienvenidos.
 | DankMaterialShell | «no molestar» |
 | fuente Inter | se ve como en las imágenes |
 
-En Arch:
-
-```bash
-sudo pacman -S quickshell jq python imagemagick grim python-evdev inter-font
-```
+No hace falta instalarlos antes: el instalador revisa qué falta y ofrece
+instalarlo.
 
 ## Instalación
 
@@ -94,9 +91,26 @@ cd modo-juego-niri
 ./install.sh
 ```
 
-El instalador no pide `sudo`: copia los programas a `~/.local/bin`, la
-interfaz a `~/.config/quickshell` y los ejemplos de configuración a
-`~/.config/modo-juego`. Después agrega los atajos a niri con esta línea en
+El instalador revisa qué falta, muestra la orden exacta con que se instala
+y pregunta antes de ejecutarla: primero lo necesario y después, aparte, lo
+recomendado. Instalar paquetes es lo único que pide tu contraseña; lo demás
+va a tu carpeta personal (`~/.local/bin`, `~/.config/quickshell` y
+`~/.config/modo-juego`).
+
+| Opción | Qué hace |
+|---|---|
+| `./install.sh` | pregunta antes de instalar paquetes |
+| `./install.sh --si` | instala lo necesario y lo recomendado sin preguntar |
+| `./install.sh --sin-dependencias` | no instala paquetes: solo dice qué falta |
+| `./install.sh --asistente` | además prepara el asistente con IA |
+
+Conoce los paquetes de Arch (`pacman`), Debian y Ubuntu (`apt`) y Fedora
+(`dnf`). Los nombres de Arch están comprobados; los de las otras dos no. Fuera
+de Arch, niri y Quickshell hay que instalarlos a mano antes, y el instalador
+lo avisa. Lo que depende de tu equipo no se instala solo: `power-profiles-daemon`
+(choca con TLP), `asusctl` y DankMaterialShell.
+
+Después agrega los atajos a niri con esta línea en
 `~/.config/niri/config.kdl`:
 
 ```kdl
@@ -115,7 +129,8 @@ Y la entrada con el lanzador, sin cerrar nada:
 modo-juego animacion
 ```
 
-Para el asistente con IA:
+Para el asistente con IA (crea un entorno de Python aparte y baja el paquete
+de Anthropic):
 
 ```bash
 ./install.sh --asistente

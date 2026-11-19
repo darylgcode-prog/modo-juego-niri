@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Instala el modo juego para niri en tu carpeta personal. No pide sudo ni
-# toca nada del sistema.
+# Instala el modo juego para niri en tu carpeta personal.
 #
-#   ./install.sh               instala los programas, la interfaz y los ejemplos
-#   ./install.sh --asistente   además prepara el asistente con IA (crea un
-#                              entorno de Python y baja el paquete de Anthropic)
+#   ./install.sh                    instala; si falta algo, te pregunta si lo instala
+#   ./install.sh --si               responde que sí a todo (lo necesario y lo recomendado)
+#   ./install.sh --sin-dependencias no instala paquetes: solo dice qué falta
+#   ./install.sh --asistente        además prepara el asistente con IA (crea un
+#                                   entorno de Python y baja el paquete de Anthropic)
 #
+# Los programas van a tu carpeta personal, sin sudo. Lo único que pide tu
+# contraseña es instalar paquetes del sistema, y solo si dices que sí.
 # Volver a ejecutarlo actualiza los programas y la interfaz, y deja tu
 # configuración (~/.config/modo-juego) como esté.
 set -euo pipefail
@@ -15,48 +18,169 @@ BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 DATOS="${XDG_DATA_HOME:-$HOME/.local/share}"
 CON_ASISTENTE=no
+DEPENDENCIAS=preguntar      # preguntar | si | no
 
 for arg in "$@"; do
   case $arg in
     --asistente) CON_ASISTENTE=si ;;
-    -h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --si) DEPENDENCIAS=si ;;
+    --sin-dependencias) DEPENDENCIAS=no ;;
+    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "No conozco la opción «$arg». Prueba con --help." >&2; exit 2 ;;
   esac
 done
 
 hay() { command -v "$1" >/dev/null 2>&1; }
 
-echo "== Lo que hace falta =="
-faltan=0
-revisar() {   # programa | para qué | obligatorio(si/no)
-  if hay "$1"; then
-    printf '  %-16s está\n' "$1"
-  elif [[ $3 = si ]]; then
-    printf '  %-16s FALTA   %s\n' "$1" "$2"
-    faltan=1
+# ── Con qué se instalan paquetes en este sistema ─────────────────────
+GESTOR=''
+if hay pacman; then
+  GESTOR=pacman
+elif hay apt-get; then
+  GESTOR=apt
+elif hay dnf; then
+  GESTOR=dnf
+fi
+
+# Lo que se necesita. Una línea por cosa:
+#   cómo se comprueba | clase | para qué | paquete en pacman | apt | dnf
+# Clases: necesario (sin esto no funciona), recomendado (se ofrece instalar),
+# aparte (no se instala solo: depende de tu equipo o puede chocar con algo).
+# La comprobación es un programa, o «py:módulo» o «fuente:nombre».
+# Un guion en el paquete = en ese sistema hay que instalarlo a mano.
+# Los nombres de pacman están comprobados; los de apt y dnf no.
+REQUISITOS='
+niri|necesario|el escritorio para el que está hecho|niri|-|-
+qs|necesario|Quickshell: la animación, el lanzador y el compañero|quickshell|-|-
+jq|necesario|lo usa el script en todas partes|jq|jq|jq
+python3|necesario|el catálogo de juegos y las carátulas|python|python3|python3
+magick|necesario|ImageMagick: convierte iconos y carátulas|imagemagick|imagemagick|ImageMagick
+pw-play|recomendado|los sonidos|pipewire-audio|pipewire-bin|pipewire-utils
+notify-send|recomendado|avisos cuando no hay animación|libnotify|libnotify-bin|libnotify
+grim|recomendado|la captura que acompaña las preguntas al asistente|grim|grim|grim
+py:evdev|recomendado|manejar el lanzador con mando|python-evdev|python3-evdev|python3-evdev
+mangohud|recomendado|contador de FPS en los juegos|mangohud|mangohud|mangohud
+fuente:Inter|recomendado|la letra con que está diseñado|inter-font|fonts-inter|rsms-inter-fonts
+powerprofilesctl|aparte|perfil de rendimiento al jugar (choca con TLP)|power-profiles-daemon|power-profiles-daemon|power-profiles-daemon
+asusctl|aparte|que el teclado reaccione (solo portátiles ASUS)|-|-|-
+dms|aparte|«no molestar» (solo con DankMaterialShell)|-|-|-
+'
+
+esta() {   # ¿está lo que pide esta comprobación?
+  case $1 in
+    py:*) python3 -c "import ${1#py:}" >/dev/null 2>&1 ;;
+    # (Sin «grep -q»: al cortar antes de tiempo, fc-list falla y con
+    # pipefail eso se leería como que la fuente no está.)
+    fuente:*) hay fc-list && fc-list : family 2>/dev/null | grep -ci "^${1#fuente:}" >/dev/null ;;
+    *) hay "$1" ;;
+  esac
+}
+
+paquete_de() {   # pacman | apt | dnf (campos 4, 5 y 6)
+  case $GESTOR in
+    pacman) echo "$1" ;;
+    apt) echo "$2" ;;
+    dnf) echo "$3" ;;
+    *) echo "-" ;;
+  esac
+}
+
+orden_instalar() {   # la orden completa para instalar los paquetes dados
+  case $GESTOR in
+    pacman) echo "sudo pacman -S --needed $*" ;;
+    apt) echo "sudo apt-get install $*" ;;
+    dnf) echo "sudo dnf install $*" ;;
+  esac
+}
+
+# Recorre los requisitos y llena las listas de lo que falta.
+revisar() {
+  PAQ_NECESARIOS=() PAQ_RECOMENDADOS=() A_MANO=() FALTA_NECESARIO=0
+  local prueba clase para p_pacman p_apt p_dnf nombre paquete
+  while IFS='|' read -r prueba clase para p_pacman p_apt p_dnf; do
+    [[ -n $prueba ]] || continue
+    nombre=${prueba#*:}
+    if esta "$prueba"; then
+      [[ ${1:-} = callado ]] || printf '  %-16s está\n' "$nombre"
+      continue
+    fi
+    paquete=$(paquete_de "$p_pacman" "$p_apt" "$p_dnf")
+    case $clase in
+      necesario)
+        FALTA_NECESARIO=1
+        [[ ${1:-} = callado ]] || printf '  %-16s FALTA    %s\n' "$nombre" "$para"
+        if [[ $paquete = - ]]; then A_MANO+=("$nombre"); else PAQ_NECESARIOS+=("$paquete"); fi
+        ;;
+      recomendado)
+        [[ ${1:-} = callado ]] || printf '  %-16s no está  (recomendado: %s)\n' "$nombre" "$para"
+        [[ $paquete = - ]] || PAQ_RECOMENDADOS+=("$paquete")
+        ;;
+      aparte)
+        [[ ${1:-} = callado ]] || printf '  %-16s no está  (opcional: %s)\n' "$nombre" "$para"
+        ;;
+    esac
+  done <<<"$REQUISITOS"
+}
+
+preguntar() {   # pregunta | respuesta por defecto (s/n). Devuelve 0 si es sí.
+  local respuesta
+  case $DEPENDENCIAS in
+    si) return 0 ;;
+    no) return 1 ;;
+  esac
+  # Sin una terminal delante no hay a quién preguntar: no se instala nada.
+  [[ -t 0 ]] || return 1
+  if [[ $2 = s ]]; then
+    read -r -p "$1 [S/n] " respuesta
+    [[ -z $respuesta || $respuesta =~ ^[sSyY] ]]
   else
-    printf '  %-16s no está (opcional: %s)\n' "$1" "$2"
+    read -r -p "$1 [s/N] " respuesta
+    [[ $respuesta =~ ^[sSyY] ]]
   fi
 }
-revisar niri "el escritorio para el que está hecho" si
-revisar qs "Quickshell 0.2 o más nuevo: la animación y el lanzador" si
-revisar jq "lo usa el script en todas partes" si
-revisar python3 "el catálogo de juegos y las carátulas" si
-revisar magick "ImageMagick: convierte iconos y carátulas" si
-revisar notify-send "avisos cuando no hay animación" no
-revisar pw-play "PipeWire: los sonidos" no
-revisar grim "la captura que acompaña las preguntas al asistente" no
-revisar powerprofilesctl "perfil de energía de rendimiento al jugar" no
-revisar mangohud "contador de FPS en los juegos" no
-revisar asusctl "el teclado reacciona (portátiles ASUS)" no
-revisar dms "«no molestar» en DankMaterialShell" no
+
+echo "== Lo que hace falta =="
+revisar
 if ! hay google-chrome-stable && ! hay chromium && ! hay brave && ! hay vivaldi-stable && ! hay microsoft-edge-stable; then
   echo "  (no hay un navegador tipo Chromium: el compañero no abrirá las guías web)"
 fi
-python3 -c "import evdev" 2>/dev/null || echo "  (falta python-evdev: el lanzador no se podrá manejar con mando)"
-if ((faltan)); then
+
+# Lo que este sistema no trae en sus paquetes va primero: sin eso no tiene
+# sentido pedir la contraseña para instalar lo demás.
+if ((${#A_MANO[@]})); then
   echo
-  echo "Instala lo que dice FALTA y vuelve a ejecutar esto." >&2
+  echo "En este sistema hay que instalar a mano: ${A_MANO[*]}" >&2
+  echo "  niri:       https://github.com/YaLTeR/niri" >&2
+  echo "  Quickshell: https://quickshell.org  (el programa se llama «qs»)" >&2
+  echo "Instálalos y vuelve a ejecutar esto." >&2
+  exit 1
+fi
+
+if ((${#PAQ_NECESARIOS[@]})); then
+  echo
+  echo "Faltan paquetes necesarios. Se instalan con:"
+  echo "    $(orden_instalar "${PAQ_NECESARIOS[@]}")"
+  if preguntar "¿Los instalo ahora? (te pedirá tu contraseña)" s; then
+    # shellcheck disable=SC2046
+    $(orden_instalar "${PAQ_NECESARIOS[@]}") || echo "La instalación de paquetes no terminó bien." >&2
+  fi
+fi
+if ((${#PAQ_RECOMENDADOS[@]})); then
+  echo
+  echo "Recomendados que no están (funciona sin ellos, con menos cosas):"
+  echo "    $(orden_instalar "${PAQ_RECOMENDADOS[@]}")"
+  if preguntar "¿Los instalo también?" n; then
+    # shellcheck disable=SC2046
+    $(orden_instalar "${PAQ_RECOMENDADOS[@]}") || echo "La instalación de los recomendados no terminó bien." >&2
+  fi
+fi
+
+# Después de instalar (o de no hacerlo), ¿quedó lo necesario?
+revisar callado
+if ((FALTA_NECESARIO)); then
+  echo
+  echo "Siguen faltando paquetes necesarios: ${PAQ_NECESARIOS[*]}" >&2
+  echo "Instálalos y vuelve a ejecutar esto." >&2
   exit 1
 fi
 
@@ -105,9 +229,11 @@ if [[ $CON_ASISTENTE = si ]]; then
   if hay uv; then
     uv venv -q "$DATOS/modo-juego/venv"
     uv pip install -q --python "$DATOS/modo-juego/venv/bin/python" anthropic
-  else
-    python3 -m venv "$DATOS/modo-juego/venv"
+  elif python3 -m venv "$DATOS/modo-juego/venv" 2>/dev/null; then
     "$DATOS/modo-juego/venv/bin/pip" install -q anthropic
+  else
+    echo "  No pude crear el entorno de Python. Instala «uv» (o el paquete python3-venv) y repite con --asistente." >&2
+    exit 1
   fi
   echo "  listo: guarda tu clave de Anthropic en Ajustes (F2 en el lanzador)"
 fi
