@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""Arma el catálogo que muestra el lanzador del modo juego.
+
+Lee las entradas de aplicaciones (.desktop) de la categoría Juegos, los
+juegos instalados en Steam y los de Lutris, y los reparte en tres filas:
+juegos, lanzadores y emuladores. Escribe un JSON (por defecto en
+~/.cache/modo-juego/catalogo.json).
+
+También suma las ROMs: cada archivo de juego que encuentre en las carpetas
+de ~/.config/modo-juego/roms.conf (una subcarpeta por consola) aparece en
+la fila de juegos y se abre directo con su emulador.
+
+Carátulas propias: deja una imagen en ~/.config/modo-juego/caratulas/ con
+el nombre de la entrada (por ejemplo eldenring.jpg) y se usa en la tarjeta.
+"""
+import configparser
+import glob
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+CASA = os.path.expanduser("~")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", f"{CASA}/.cache"), "modo-juego")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", f"{CASA}/.config"), "modo-juego")
+CARATULAS = os.path.join(CONFIG, "caratulas")
+FONDOS = os.path.join(CONFIG, "fondos")
+LOGOS = os.path.join(CONFIG, "logos")
+PARTIDAS = os.path.join(os.environ.get("XDG_STATE_HOME", f"{CASA}/.local/state"), "modo-juego", "partidas.jsonl")
+STEAM = f"{CASA}/.local/share/Steam"
+
+# De menor a mayor prioridad: una entrada del usuario tapa a la del sistema.
+DIRS_APPS = [
+    "/usr/share/applications",
+    "/var/lib/flatpak/exports/share/applications",
+    f"{CASA}/.local/share/flatpak/exports/share/applications",
+    f"{CASA}/.local/share/applications",
+]
+
+LANZADORES = {
+    "steam", "battlenet", "hydralauncher", "net.lutris.lutris", "quiver-launcher",
+    "org.prismlauncher.prismlauncher", "heroic", "com.heroicgameslauncher.hgl",
+    "com.usebottles.bottles", "itch", "io.itch.itch", "minigalaxy",
+}
+EMULADORES = {
+    "duckstation-qt", "info.cemu.cemu", "dolphin-emu", "ppssppsdl", "ppssppqt",
+    "eden", "rpcs3", "pcsx2", "pcsx2-qt", "azahar", "eglantine", "lichii",
+    "retroarch", "org.libretro.retroarch", "ryujinx", "citron", "sudachi",
+    "xemu", "mgba-qt", "melonds", "flycast", "mame", "shadps4", "xenia",
+}
+
+DIRS_ICONOS = [
+    f"{CASA}/.local/share/icons",
+    f"{CASA}/.icons",
+    f"{CASA}/.local/share/flatpak/exports/share/icons",
+    "/var/lib/flatpak/exports/share/icons",
+    "/usr/share/icons",
+]
+TAMANOS = ["512x512", "256x256", "scalable", "192x192", "128x128", "96x96", "64x64", "48x48"]
+
+
+def buscar_icono(nombre):
+    """Devuelve la ruta del archivo del icono, o '' si no aparece."""
+    if not nombre:
+        return ""
+    if os.path.isabs(nombre):
+        return nombre if os.path.isfile(nombre) else ""
+    for base in DIRS_ICONOS:
+        for ext in ("png", "svg"):
+            directo = os.path.join(base, f"{nombre}.{ext}")
+            if os.path.isfile(directo):
+                return directo
+        for tema in ("hicolor", "Papirus", "Papirus-Dark", "Adwaita", "breeze"):
+            for tam in TAMANOS:
+                for ext in ("png", "svg"):
+                    ruta = os.path.join(base, tema, tam, "apps", f"{nombre}.{ext}")
+                    if os.path.isfile(ruta):
+                        return ruta
+    for ext in ("png", "svg", "xpm"):
+        ruta = f"/usr/share/pixmaps/{nombre}.{ext}"
+        if os.path.isfile(ruta):
+            return ruta
+    return ""
+
+
+def ico_a_png(ruta):
+    """Los .ico traen varios tamaños: saca el más grande a un PNG en caché."""
+    destino = os.path.join(CACHE, "iconos", re.sub(r"[^A-Za-z0-9]+", "_", ruta) + ".png")
+    if os.path.isfile(destino) and os.path.getmtime(destino) >= os.path.getmtime(ruta):
+        return destino
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    try:
+        info = subprocess.run(["magick", "identify", "-format", "%w %s\n", ruta],
+                              capture_output=True, text=True, timeout=20).stdout.split("\n")
+        cuadros = [tuple(map(int, linea.split())) for linea in info if linea.strip()]
+        _, indice = max(cuadros)
+        subprocess.run(["magick", f"{ruta}[{indice}]", destino], check=True, timeout=20)
+        return destino
+    except Exception:
+        return ""
+
+
+def caratula_de(clave, extra=()):
+    """Carátula puesta a mano, o alguna de las rutas extra que exista."""
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        ruta = os.path.join(CARATULAS, f"{clave}.{ext}")
+        if os.path.isfile(ruta):
+            return ruta
+    for patron in extra:
+        encontrados = sorted(glob.glob(patron, recursive=True))
+        if encontrados:
+            return encontrados[0]
+    return ""
+
+
+def imagen_de(carpeta, clave, extra=()):
+    """Imagen puesta a mano o bajada en esa carpeta, o alguna de las rutas extra."""
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        ruta = os.path.join(carpeta, f"{clave}.{ext}")
+        if os.path.isfile(ruta):
+            return ruta
+    for patron in extra:
+        encontrados = sorted(glob.glob(patron, recursive=True))
+        if encontrados:
+            return encontrados[0]
+    return ""
+
+
+def arte_steam(appid, archivo):
+    """Rutas donde Steam guarda en el disco el arte de un juego instalado."""
+    if not appid:
+        return ()
+    return (f"{STEAM}/appcache/librarycache/{appid}/{archivo}",
+            f"{STEAM}/appcache/librarycache/{appid}/**/{archivo}",
+            f"{STEAM}/appcache/librarycache/{appid}_{archivo}")
+
+
+def tiempos_steam():
+    """Minutos jugados y última vez, según Steam: {appid: (minutos, última)}."""
+    tiempos = {}
+    for ruta in glob.glob(f"{STEAM}/userdata/*/config/localconfig.vdf"):
+        try:
+            texto = open(ruta, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for m in re.finditer(r'"(\d+)"\s*\{', texto):
+            # El bloque del juego llega hasta su llave de cierre.
+            nivel, i = 1, m.end()
+            while nivel and i < len(texto):
+                nivel += {"{": 1, "}": -1}.get(texto[i], 0)
+                i += 1
+            bloque = texto[m.end():i]
+            jugado = re.search(r'"Playtime"\s+"(\d+)"', bloque)
+            ultimo = re.search(r'"LastPlayed"\s+"(\d+)"', bloque)
+            if jugado or ultimo:
+                previo = tiempos.get(m.group(1), (0, 0))
+                tiempos[m.group(1)] = (max(previo[0], int(jugado.group(1)) if jugado else 0),
+                                       max(previo[1], int(ultimo.group(1)) if ultimo else 0))
+    return tiempos
+
+
+def tiempos_propios():
+    """Lo que anotó el lanzador: {id: (segundos, última vez)}."""
+    tiempos = {}
+    try:
+        with open(PARTIDAS, encoding="utf-8") as f:
+            for linea in f:
+                try:
+                    p = json.loads(linea)
+                    seg, ult = tiempos.get(p["id"], (0, 0))
+                    tiempos[p["id"]] = (seg + int(p.get("segundos", 0)), max(ult, int(p.get("inicio", 0))))
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return tiempos
+
+
+def comando_de(exec_, carpeta):
+    """Quita los códigos %f/%U del Exec y antepone el cd si hay Path."""
+    cmd = re.sub(r"%[fFuUdDnNickvm]", "", exec_).replace("%%", "%").strip()
+    if carpeta:
+        cmd = f"cd {shlex.quote(carpeta)} && {cmd}"
+    return cmd
+
+
+def entradas_desktop():
+    porid = {}
+    for carpeta in DIRS_APPS:
+        for ruta in sorted(glob.glob(os.path.join(carpeta, "*.desktop"))):
+            porid[os.path.basename(ruta)[:-8]] = ruta
+    for clave, ruta in porid.items():
+        cp = configparser.RawConfigParser(strict=False, interpolation=None)
+        cp.optionxform = str
+        try:
+            cp.read(ruta, encoding="utf-8")
+            d = cp["Desktop Entry"]
+        except Exception:
+            continue
+        if d.get("Type", "Application") != "Application":
+            continue
+        if d.get("NoDisplay", "false").lower() == "true" or d.get("Hidden", "false").lower() == "true":
+            continue
+        categorias = {c for c in d.get("Categories", "").split(";") if c}
+        if "Game" not in categorias and clave.lower() not in LANZADORES | EMULADORES:
+            continue
+        exec_ = d.get("Exec", "")
+        if not exec_:
+            continue
+        if clave.lower() in LANZADORES:
+            tipo = "lanzadores"
+        elif "Emulator" in categorias or clave.lower() in EMULADORES:
+            tipo = "emuladores"
+        else:
+            tipo = "juegos"
+        icono = buscar_icono(d.get("Icon", ""))
+        if icono.lower().endswith(".ico"):
+            icono = ico_a_png(icono)
+        nombre = d.get("Name[es]", d.get("Name", clave))
+        # Un acceso creado por Steam: su carátula ya está en el disco.
+        extra = [f"{CASA}/.local/share/lutris/coverart/{clave}.jpg"]
+        de_steam = re.search(r"steam://rungameid/(\d+)", exec_)
+        appid = de_steam.group(1) if de_steam else None
+        extra += arte_steam(appid, "library_600x900.jpg")
+        yield tipo, {
+            "id": clave,
+            "nombre": nombre,
+            "detalle": d.get("Comment[es]", d.get("Comment", "")),
+            "icono": icono,
+            "caratula": caratula_de(clave, extra),
+            "fondo": imagen_de(FONDOS, clave, arte_steam(appid, "library_hero.jpg")),
+            "logo": imagen_de(LOGOS, clave, arte_steam(appid, "logo.png")),
+            "steam": appid or "",
+            "cmd": comando_de(exec_, d.get("Path", "")),
+        }
+
+
+# ── ROMs ─────────────────────────────────────────────────────────────
+
+# Por consola: cómo se llama, qué nombres de carpeta le corresponden, con
+# qué emuladores se abre (por orden de preferencia; el nombre es el de su
+# acceso), los argumentos para arrancar directo el juego y qué archivos
+# cuentan como juego.
+SISTEMAS = {
+    "wiiu": ("Wii U", ["wiiu"], ["info.cemu.Cemu"], "-f -g {rom}", [".wua", ".wux", ".wud"]),
+    "switch": ("Switch", ["switch", "nsw", "ns", "nswitch"], ["eden"], "-f -g {rom}", [".xci", ".nsp"]),
+    "switch2": ("Switch 2", ["switch2", "nsw2", "ns2"], ["eglantine", "lichii"], "-f -g {rom}", [".nup", ".xci", ".nsp"]),
+    "ps1": ("PlayStation", ["ps1", "psx", "playstation"], ["duckstation-qt"], "-batch -fullscreen -- {rom}",
+            [".chd", ".cue", ".pbp", ".m3u", ".iso"]),
+    "ps2": ("PlayStation 2", ["ps2"], ["pcsx2", "pcsx2-qt"], "-batch -fullscreen -- {rom}", [".iso", ".chd", ".cso"]),
+    "ps3": ("PlayStation 3", ["ps3"], ["rpcs3"], "--no-gui --fullscreen {rom}", []),
+    "psp": ("PSP", ["psp"], ["PPSSPPSDL", "ppssppqt"], "--fullscreen {rom}", [".iso", ".cso", ".pbp", ".chd"]),
+    "gamecube": ("GameCube", ["gamecube", "gc", "ngc"], ["dolphin-emu"], "-b -e {rom}",
+                 [".rvz", ".iso", ".gcm", ".gcz", ".ciso"]),
+    "wii": ("Wii", ["wii"], ["dolphin-emu"], "-b -e {rom}", [".rvz", ".iso", ".wbfs", ".gcz", ".ciso"]),
+    "3ds": ("3DS", ["3ds", "n3ds"], ["azahar"], "-f {rom}", [".3ds", ".cci", ".cxi", ".3dsx", ".zcci"]),
+}
+ROMS_CONF = os.path.join(CONFIG, "roms.conf")
+
+
+def leer_roms_conf():
+    """Devuelve (carpetas, {sistema: emulador preferido})."""
+    carpetas, preferidos = [], {}
+    try:
+        with open(ROMS_CONF, encoding="utf-8") as f:
+            for linea in f:
+                linea = linea.split("#", 1)[0]
+                if "=" not in linea:
+                    continue
+                clave, valor = (x.strip() for x in linea.split("=", 1))
+                if clave == "carpeta" and valor:
+                    carpetas.append(os.path.expanduser(valor))
+                elif clave in SISTEMAS and valor:
+                    preferidos[clave] = valor
+    except OSError:
+        carpetas = [f"{CASA}/ROMs"]
+    return carpetas, preferidos
+
+
+def nombre_limpio(archivo, es_carpeta=False):
+    """«Zelda [0100…][v0] (USA).xci» → «Zelda»."""
+    nombre = archivo if es_carpeta else re.sub(r"\.[A-Za-z0-9]{2,4}$", "", archivo)
+    nombre = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", nombre)
+    return re.sub(r"\s+", " ", nombre.replace("_", " ")).strip() or archivo
+
+
+def a_cache(origen, nombre, ext):
+    """Convierte una imagen del propio juego (TGA de Wii U) y la deja en caché."""
+    destino = os.path.join(CACHE, "roms", f"{nombre}.{ext}")
+    try:
+        if os.path.isfile(destino) and os.path.getmtime(destino) >= os.path.getmtime(origen):
+            return destino
+        os.makedirs(os.path.dirname(destino), exist_ok=True)
+        subprocess.run(["magick", f"{origen}[0]", "-auto-orient", "-strip", destino], check=True, timeout=30,
+                       capture_output=True)
+        return destino
+    except Exception:
+        return ""
+
+
+def es_extra(nombre):
+    """Actualizaciones y contenido adicional: no son el juego."""
+    return bool(re.search(r"\bupdate\b|\bdlc\b|\[upd\]|\[dlc\]|\bparche\b", nombre, re.I))
+
+
+def roms(emuladores):
+    """ROMs de las carpetas configuradas. `emuladores`: {id: entrada del catálogo}."""
+    carpetas, preferidos = leer_roms_conf()
+    por_id = {k.lower(): v for k, v in emuladores.items()}
+    vistos = set()
+    for base in carpetas:
+        if not os.path.isdir(base):
+            continue
+        for sub in sorted(os.listdir(base)):
+            sistema = next((s for s, d in SISTEMAS.items() if sub.lower() in d[1]), None)
+            raiz = os.path.join(base, sub)
+            if not sistema or not os.path.isdir(raiz):
+                continue
+            titulo, _, emus, args, extensiones = SISTEMAS[sistema]
+            orden = [preferidos[sistema]] + emus if sistema in preferidos else emus
+            emulador = next((por_id[e.lower()] for e in orden if e.lower() in por_id), None)
+            if not emulador:
+                print(f"ROMs de {titulo} en {raiz}: no encuentro su emulador ({', '.join(emus)}).", file=sys.stderr)
+                continue
+            for carpeta, subdirs, archivos in os.walk(raiz):
+                if carpeta[len(raiz):].count(os.sep) >= 4:
+                    subdirs[:] = []
+                    continue
+                encontrados = []      # (ruta a abrir, nombre, icono, fondo)
+                # Wii U en carpetas: code/*.rpx y meta/. Las de actualización y DLC no se listan.
+                rpx = sorted(glob.glob(os.path.join(glob.escape(carpeta), "code", "*.rpx")))
+                if sistema == "wiiu" and rpx:
+                    subdirs[:] = []
+                    if not es_extra(os.path.basename(carpeta)):
+                        meta = os.path.join(carpeta, "meta")
+                        clave_img = re.sub(r"[^a-z0-9]+", "-", nombre_limpio(os.path.basename(carpeta), True).lower())
+                        icono = a_cache(os.path.join(meta, "iconTex.tga"), f"{clave_img}-icono", "png")
+                        fondo = a_cache(os.path.join(meta, "bootTvTex.tga"), f"{clave_img}-fondo", "jpg")
+                        encontrados.append((rpx[0], nombre_limpio(os.path.basename(carpeta), True), icono, fondo))
+                # PlayStation 3 en carpetas: PS3_GAME dentro.
+                elif sistema == "ps3" and os.path.isdir(os.path.join(carpeta, "PS3_GAME")):
+                    subdirs[:] = []
+                    encontrados.append((carpeta, nombre_limpio(os.path.basename(carpeta), True), "", ""))
+                else:
+                    for archivo in sorted(archivos):
+                        if os.path.splitext(archivo)[1].lower() in extensiones and not es_extra(archivo):
+                            encontrados.append((os.path.join(carpeta, archivo), nombre_limpio(archivo), "", ""))
+                for ruta, nombre, icono, fondo in encontrados:
+                    clave = f"rom-{sistema}-" + re.sub(r"[^a-z0-9]+", "-", nombre.lower()).strip("-")
+                    if clave in vistos:
+                        continue
+                    vistos.add(clave)
+                    yield "juegos", {
+                        "id": clave,
+                        "nombre": nombre,
+                        "detalle": f"Se abre con {emulador['nombre']}",
+                        "sistema": titulo,
+                        "icono": icono or emulador.get("icono", ""),
+                        "caratula": caratula_de(clave),
+                        "fondo": imagen_de(FONDOS, clave) or fondo,
+                        "logo": imagen_de(LOGOS, clave),
+                        "steam": "",
+                        "cmd": f"{emulador['cmd']} {args.format(rom=shlex.quote(ruta))}",
+                    }
+
+
+def juegos_steam():
+    raiz = f"{CASA}/.local/share/Steam"
+    vdf = os.path.join(raiz, "steamapps", "libraryfolders.vdf")
+    bibliotecas = [raiz]
+    try:
+        bibliotecas += re.findall(r'"path"\s+"([^"]+)"', open(vdf, encoding="utf-8").read())
+    except OSError:
+        return
+    vistos = set()
+    for bib in dict.fromkeys(bibliotecas):
+        for acf in glob.glob(os.path.join(bib, "steamapps", "appmanifest_*.acf")):
+            texto = open(acf, encoding="utf-8", errors="replace").read()
+            appid = re.search(r'"appid"\s+"(\d+)"', texto)
+            nombre = re.search(r'"name"\s+"([^"]+)"', texto)
+            if not appid or not nombre or appid.group(1) in vistos:
+                continue
+            # Proton, runtimes y redistribuibles no son juegos.
+            if re.search(r"Proton|Steam Linux Runtime|Steamworks Common", nombre.group(1)):
+                continue
+            vistos.add(appid.group(1))
+            i = appid.group(1)
+            yield "juegos", {
+                "id": f"steam-{i}",
+                "nombre": nombre.group(1),
+                "detalle": "Steam",
+                "icono": "",
+                "caratula": caratula_de(f"steam-{i}", arte_steam(i, "library_600x900.jpg")),
+                "fondo": imagen_de(FONDOS, f"steam-{i}", arte_steam(i, "library_hero.jpg")),
+                "logo": imagen_de(LOGOS, f"steam-{i}", arte_steam(i, "logo.png")),
+                "steam": i,
+                "cmd": f"steam steam://rungameid/{i}",
+            }
+
+
+def juegos_lutris():
+    try:
+        salida = subprocess.run(["lutris", "-l", "-j"], capture_output=True, text=True, timeout=25).stdout
+        juegos = json.loads(salida[salida.index("["):])
+    except Exception:
+        return
+    for j in juegos:
+        slug = j.get("slug") or str(j.get("id"))
+        yield "juegos", {
+            "id": slug,
+            "nombre": j.get("name", slug),
+            "detalle": "Lutris",
+            "icono": buscar_icono(f"lutris_{slug}"),
+            "caratula": caratula_de(slug, (f"{CASA}/.local/share/lutris/coverart/{slug}.jpg",)),
+            "fondo": imagen_de(FONDOS, slug),
+            "logo": imagen_de(LOGOS, slug),
+            "steam": "",
+            "cmd": f"lutris lutris:rungameid/{j.get('id')}",
+        }
+
+
+def main():
+    rutas = [a for a in sys.argv[1:] if not a.startswith("--")]
+    destino = os.path.abspath(rutas[0]) if rutas else os.path.join(CACHE, "catalogo.json")
+    catalogo = {"juegos": [], "lanzadores": [], "emuladores": []}
+    ids, nombres = set(), set()
+    fuentes = [entradas_desktop(), juegos_steam()]
+    if "--sin-lutris" not in sys.argv:
+        fuentes.append(juegos_lutris())
+    for fuente in fuentes:
+        for tipo, item in fuente:
+            # Lo mismo puede venir por dos lados (Battle.net: entrada y Lutris).
+            if item["id"] in ids or item["nombre"].lower() in nombres:
+                continue
+            ids.add(item["id"])
+            nombres.add(item["nombre"].lower())
+            catalogo[tipo].append(item)
+    # Horas jugadas y última vez: lo que anotó el lanzador y lo que sabe Steam.
+    propios, de_steam = tiempos_propios(), tiempos_steam()
+    # Las ROMs van al final: necesitan saber qué emuladores hay.
+    for tipo, item in roms({e["id"]: e for e in catalogo["emuladores"]}):
+        if item["id"] not in ids:
+            ids.add(item["id"])
+            catalogo[tipo].append(item)
+    for lista in catalogo.values():
+        for item in lista:
+            seg, ultimo = propios.get(item["id"], (0, 0))
+            minutos_steam, ultimo_steam = de_steam.get(item.get("steam", ""), (0, 0))
+            item["horas"] = round(max(seg / 3600, minutos_steam / 60), 1)
+            item["ultimo"] = max(ultimo, ultimo_steam)
+        lista.sort(key=lambda x: x["nombre"].lower())
+    # Los juegos, con lo último que jugaste primero.
+    catalogo["juegos"].sort(key=lambda x: -x["ultimo"])
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    with open(destino + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(catalogo, f, ensure_ascii=False, indent=1)
+    os.replace(destino + ".tmp", destino)
+    if "--ver" in sys.argv:
+        for tipo, lista in catalogo.items():
+            print(f"{tipo} ({len(lista)}):")
+            for x in lista:
+                marca = "carátula" if x["caratula"] else ("icono" if x["icono"] else "sin imagen")
+                extras = "".join(f" +{n}" for n in ("fondo", "logo") if x.get(n))
+                horas = f"  {x['horas']} h" if x.get("horas") else ""
+                consola = f"  ({x['sistema']})" if x.get("sistema") else ""
+                print(f"  {x['nombre']:<32} [{marca}{extras}]{horas}{consola}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,6 @@
+# Nada personal entra al repositorio: claves, estado ni arte bajado.
+*.clave
+__pycache__/
+*.pyc
+/venv/
+.DS_Store

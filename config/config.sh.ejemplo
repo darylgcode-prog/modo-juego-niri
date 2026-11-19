@@ -1,0 +1,37 @@
+# Configuración propia del modo juego.
+#
+# Copia este archivo a ~/.config/modo-juego/config.sh y deja solo lo que
+# quieras cambiar: lo que no pongas queda con su valor por defecto (los
+# valores por defecto están al principio de ~/.local/bin/modo-juego).
+# Lo que se cambia desde Ajustes (F2 en el lanzador) va aparte, en
+# ajustes.sh, y manda sobre lo de aquí.
+
+# Programas que se cierran completos al activar.
+#   nombre | cómo encontrarlo (argumentos de pgrep) | comando para reabrirlo
+# Sin comando = no se reabre al desactivar.
+#PROGRAMAS=(
+#  "Chrome|-x chrome|google-chrome-stable"
+#  "Firefox|-x firefox|firefox"
+#  "Spotify|-x spotify|spotify"
+#  "Discord|-x Discord|discord"
+#)
+
+# "no": al activar solo se cierran los PROGRAMAS, no el resto de ventanas.
+#CERRAR_OTRAS_VENTANAS=si
+
+# Ventanas que no se tocan (expresión regular sobre el app-id).
+#VENTANAS_QUE_SE_QUEDAN='^(steam.*|lutris|heroic.*|gamescope.*|.*\.exe|wine.*)$'
+
+# Servicios del usuario que se detienen (y se reanudan al desactivar).
+#SERVICIOS_USUARIO=('syncthing.service' 'mi-respaldo.timer')
+
+# Servicios del sistema que se detienen. Piden contraseña cada vez.
+# Lista vacía = no se pide nada.
+#SERVICIOS_SISTEMA=(docker.socket docker.service containerd.service)
+
+# Color del teclado mientras se juega (solo equipos ASUS con asusctl).
+#COLOR_TECLADO=19d9ff
+
+# Órdenes propias al activar y al desactivar.
+#AL_ACTIVAR='systemctl --user stop mi-cosa.service'
+#AL_DESACTIVAR='systemctl --user start mi-cosa.service'

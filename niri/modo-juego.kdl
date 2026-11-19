@@ -1,0 +1,44 @@
+// Atajos y reglas del modo juego para niri.
+//
+// Para usarlo, agrega esta línea a ~/.config/niri/config.kdl:
+//     include "modo-juego.kdl"
+// (o copia lo que te sirva a tu configuración). Si alguno de estos atajos
+// ya está ocupado en tu configuración, niri avisará del duplicado: cambia
+// la combinación aquí.
+
+binds {
+    Mod+Alt+G hotkey-overlay-title="Modo juego (activar o desactivar)" {
+        spawn "modo-juego";
+    }
+    Mod+Alt+J hotkey-overlay-title="Lanzador de juegos" {
+        spawn "modo-juego" "lanzador";
+    }
+
+    // Compañero de juego (segundo monitor): se manejan sin soltar el juego.
+    Mod+Alt+Right hotkey-overlay-title="Compañero: guía siguiente" {
+        spawn "modo-juego" "companero" "siguiente";
+    }
+    Mod+Alt+Left hotkey-overlay-title="Compañero: guía anterior" {
+        spawn "modo-juego" "companero" "anterior";
+    }
+    Mod+Alt+Down hotkey-overlay-title="Compañero: bajar en la guía" {
+        spawn "modo-juego" "companero" "bajar";
+    }
+    Mod+Alt+Up hotkey-overlay-title="Compañero: subir en la guía" {
+        spawn "modo-juego" "companero" "subir";
+    }
+    Mod+Alt+P hotkey-overlay-title="Compañero: preguntar al asistente" {
+        spawn "modo-juego" "companero" "preguntar";
+    }
+
+    // En portátiles ASUS, la tecla Armoury Crate suele llegar como
+    // XF86Launch3 y no hace nada: sirve para el modo juego.
+    // XF86Launch3 hotkey-overlay-title="Modo juego" { spawn "modo-juego"; }
+}
+
+// El navegador de guías del compañero abre sin quitarle el foco al juego.
+window-rule {
+    match app-id="^modo-juego-guias$"
+    open-focused false
+    open-maximized true
+}

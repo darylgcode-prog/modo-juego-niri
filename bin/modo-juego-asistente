@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Asistente del compañero de juego: responde una pregunta sobre el juego
+que se está jugando, usando la API de Anthropic con búsqueda web.
+
+La pregunta llega por la entrada estándar. La respuesta sale a medida que
+se escribe; al final va una línea «@@META {...}» con el costo aproximado y
+las fuentes, o «@@ERROR mensaje» si algo falló.
+
+  modo-juego-asistente --juego "ELDEN RING" [--imagen captura.jpg]
+                       [--historial sesion.json] [--modelo opus|sonnet|haiku]
+  modo-juego-asistente --probar-clave
+
+La clave se lee de ANTHROPIC_API_KEY o de ~/.config/modo-juego/anthropic.clave
+(se guarda desde Ajustes, en el lanzador). El paquete `anthropic` vive en el
+entorno ~/.local/share/modo-juego/venv.
+"""
+import argparse
+import base64
+import json
+import os
+import sys
+
+# El paquete `anthropic` vive en un entorno propio (lo crea el instalador
+# con --asistente). Si este Python no lo tiene, se relanza con el de ahí.
+_ENTORNO = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+                        "modo-juego", "venv", "bin", "python")
+try:
+    import anthropic
+except ImportError:
+    # (El Python del entorno es un enlace al del sistema: lo que distingue
+    # a uno de otro es la marca, no la ruta real.)
+    if os.path.isfile(_ENTORNO) and not os.environ.get("MODO_JUEGO_EN_ENTORNO"):
+        os.environ["MODO_JUEGO_EN_ENTORNO"] = "1"
+        os.execv(_ENTORNO, [_ENTORNO] + sys.argv)
+    print("\n@@ERROR Falta el paquete de Anthropic. Instálalo con: ./install.sh --asistente", flush=True)
+    sys.exit(2)
+
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "modo-juego")
+ARCHIVO_CLAVE = os.path.join(CONFIG, "anthropic.clave")
+
+# Nombre corto → (modelo, herramienta de búsqueda que admite, ¿alternativa ante rechazo?)
+MODELOS = {
+    "opus": ("claude-opus-5-5", "web_search_20260209", True),
+    "sonnet": ("claude-sonnet-5-5", "web_search_20260209", True),
+    # Haiku 5.5 usa la búsqueda básica y no tiene alternativa del lado del servidor.
+    "haiku": ("claude-haiku-5-5", "web_search_20250305", False),
+}
+# Dólares por millón de fichas (entrada, salida), según la página de precios
+# de Anthropic al 19-11-2026. Solo para mostrar un costo aproximado.
+PRECIOS = {
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+}
+PRECIO_BUSQUEDA = 0.01      # 10 dólares por 1.000 búsquedas
+MAX_BUSQUEDAS = 3
+
+SISTEMA = """Eres el compañero de juego de alguien que está jugando {juego} en este momento y te consulta \
+desde un segundo monitor, sin querer soltar el juego mucho rato.
+
+Responde en español, directo y breve: lo normal son unas pocas frases, o pasos numerados cuando hay que \
+llegar a un lugar o seguir un orden. Va lo que necesita para seguir jugando, no un artículo.
+
+Los datos concretos del juego (dónde está algo, qué pide un objeto, cómo se vence a un jefe, qué versión \
+cambió algo) confírmalos con la búsqueda web en vez de responder de memoria: la memoria falla justo en \
+esos detalles, y más en juegos recientes. Si no encuentras una respuesta confiable, dilo y sugiere qué \
+buscar.
+
+Si la pregunta viene con una captura, es lo que la persona ve ahora en su pantalla: úsala para saber \
+dónde está y qué tiene delante.
+
+No adelantes historia ni sorpresas más allá de lo que te pregunten."""
+
+
+def leer_clave():
+    clave = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if clave:
+        return clave
+    try:
+        with open(ARCHIVO_CLAVE, encoding="utf-8") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def fallar(mensaje, codigo=1):
+    print(f"\n@@ERROR {mensaje}", flush=True)
+    sys.exit(codigo)
+
+
+def explicar(error):
+    """Mensaje para la persona según el tipo de error de la API."""
+    if isinstance(error, anthropic.AuthenticationError):
+        return "La clave de Anthropic no es válida. Guárdala de nuevo en Ajustes."
+    if isinstance(error, anthropic.PermissionDeniedError):
+        return "La clave no tiene permiso para usar este modelo o la búsqueda web."
+    if isinstance(error, anthropic.NotFoundError):
+        return "El modelo elegido no está disponible para esta cuenta."
+    if isinstance(error, anthropic.RateLimitError):
+        return "Demasiadas consultas seguidas. Espera un momento y pregunta de nuevo."
+    if isinstance(error, anthropic.BadRequestError):
+        return f"La API rechazó la consulta: {error.message}"
+    if isinstance(error, anthropic.APIStatusError):
+        if error.status_code >= 500:
+            return "El servicio de Anthropic está con problemas. Prueba de nuevo en un rato."
+        return f"Error de la API ({error.status_code}): {error.message}"
+    if isinstance(error, anthropic.APIConnectionError):
+        return "No hay conexión con Anthropic. Revisa internet."
+    return f"Error inesperado: {error}"
+
+
+def probar_clave(cliente):
+    try:
+        cliente.models.retrieve("claude-haiku-5-5")      # no gasta fichas
+    except anthropic.AuthenticationError:
+        print("Anthropic rechazó la clave.")
+        return 1
+    except anthropic.APIConnectionError:
+        print("No pude comprobar la clave: no hay conexión con Anthropic.")
+        return 2
+    except anthropic.APIStatusError as e:
+        print(f"No pude comprobar la clave (código {e.status_code}).")
+        return 2
+    print("Clave aceptada por Anthropic.")
+    return 0
+
+
+def bloque_imagen(ruta):
+    tipo = "image/png" if ruta.lower().endswith(".png") else "image/jpeg"
+    with open(ruta, "rb") as f:
+        datos = base64.standard_b64encode(f.read()).decode("utf-8")
+    return {"type": "image", "source": {"type": "base64", "media_type": tipo, "data": datos}}
+
+
+def leer_historial(ruta):
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            return json.load(f)[-4:]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def fuentes_de(mensaje):
+    """Páginas en que se apoyó la respuesta: primero las citadas, después lo buscado."""
+    citadas, buscadas = {}, {}
+    for bloque in mensaje.content:
+        if bloque.type == "text":
+            for cita in getattr(bloque, "citations", None) or []:
+                url = getattr(cita, "url", None)
+                if url:
+                    citadas.setdefault(url, getattr(cita, "title", None) or url)
+        elif bloque.type == "web_search_tool_result" and isinstance(bloque.content, list):
+            for resultado in bloque.content:
+                url = getattr(resultado, "url", None)
+                if url:
+                    buscadas.setdefault(url, getattr(resultado, "title", None) or url)
+    elegidas = citadas or buscadas
+    return [{"titulo": t, "url": u} for u, t in list(elegidas.items())[:4]]
+
+
+def costo_de(modelo, uso_total, busquedas):
+    entrada, salida = PRECIOS.get(modelo, (0, 0))
+    if modelo == "claude-haiku-5-5" and uso_total["entrada"] > 100_000:
+        entrada, salida = 0.50, 2.50
+    return uso_total["entrada"] * entrada / 1e6 + uso_total["salida"] * salida / 1e6 + busquedas * PRECIO_BUSQUEDA
+
+
+def responder(cliente, args, pregunta):
+    modelo, herramienta, con_alternativa = MODELOS[args.modelo]
+    historial = leer_historial(args.historial) if args.historial else []
+
+    texto = pregunta
+    if historial:
+        # Las preguntas anteriores van como contexto en texto, no como turnos
+        # repetidos: así cada consulta es independiente y barata.
+        previas = "\n".join(f"- Pregunté: {h['p']}\n  Me respondiste: {h['r'][:500]}" for h in historial)
+        texto = f"Antes en esta sesión de juego:\n{previas}\n\nAhora pregunto: {pregunta}"
+    contenido = []
+    if args.imagen:
+        contenido.append(bloque_imagen(args.imagen))
+    contenido.append({"type": "text", "text": texto})
+    mensajes = [{"role": "user", "content": contenido}]
+
+    comunes = dict(
+        model=modelo,
+        max_tokens=16000,
+        system=SISTEMA.format(juego=args.juego),
+        output_config={"effort": "low"},     # respuesta rápida; pensar sigue siendo adaptativo
+        tools=[{"type": herramienta, "name": "web_search", "max_uses": MAX_BUSQUEDAS}],
+    )
+    uso = {"entrada": 0, "salida": 0}
+    busquedas = 0
+    respuesta = []
+    final = None
+    for _ in range(4):      # una búsqueda larga puede pausar el turno; se reanuda
+        if con_alternativa:
+            # Si el modelo declina por una regla de seguridad, la API reintenta
+            # sola con otro modelo en la misma llamada.
+            flujo = cliente.beta.messages.stream(
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default", messages=mensajes, **comunes)
+        else:
+            flujo = cliente.messages.stream(messages=mensajes, **comunes)
+        with flujo as stream:
+            for trozo in stream.text_stream:
+                respuesta.append(trozo)
+                print(trozo, end="", flush=True)
+            final = stream.get_final_message()
+        u = final.usage
+        uso["entrada"] += (u.input_tokens or 0) + (getattr(u, "cache_creation_input_tokens", 0) or 0) \
+            + (getattr(u, "cache_read_input_tokens", 0) or 0)
+        uso["salida"] += u.output_tokens or 0
+        herramientas = getattr(u, "server_tool_use", None)
+        busquedas += (getattr(herramientas, "web_search_requests", 0) or 0) if herramientas else 0
+        if final.stop_reason != "pause_turn":
+            break
+        mensajes.append({"role": "assistant", "content": final.content})
+
+    if final.stop_reason == "refusal":
+        fallar("El asistente declinó responder esa pregunta.", 3)
+    if final.stop_reason == "max_tokens":
+        print("\n(La respuesta se cortó por larga.)", flush=True)
+
+    completa = "".join(respuesta).strip()
+    if args.historial and completa:
+        historial.append({"p": pregunta, "r": completa})
+        try:
+            with open(args.historial, "w", encoding="utf-8") as f:
+                json.dump(historial[-6:], f, ensure_ascii=False)
+        except OSError:
+            pass
+    meta = {
+        "modelo": final.model,
+        "costo": round(costo_de(modelo, uso, busquedas), 4),
+        "busquedas": busquedas,
+        "entrada": uso["entrada"],
+        "salida": uso["salida"],
+        "fuentes": fuentes_de(final),
+    }
+    print(f"\n@@META {json.dumps(meta, ensure_ascii=False)}", flush=True)
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=True)
+    p.add_argument("--juego", default="un videojuego")
+    p.add_argument("--imagen")
+    p.add_argument("--historial")
+    p.add_argument("--modelo", choices=list(MODELOS), default="opus")
+    p.add_argument("--probar-clave", action="store_true")
+    args = p.parse_args()
+
+    clave = leer_clave()
+    if not clave:
+        if args.probar_clave:
+            print("No hay clave guardada.")
+            return 1
+        fallar("Falta la clave de Anthropic. Guárdala en Ajustes (F2 en el lanzador).", 2)
+    # La clave viene de un archivo propio, así que se pasa explícita.
+    cliente = anthropic.Anthropic(api_key=clave)
+    if args.probar_clave:
+        return probar_clave(cliente)
+
+    pregunta = sys.stdin.read().strip()
+    if not pregunta:
+        fallar("No llegó ninguna pregunta.", 2)
+    if args.imagen and not os.path.isfile(args.imagen):
+        args.imagen = None
+    try:
+        responder(cliente, args, pregunta)
+    except anthropic.APIError as e:
+        fallar(explicar(e))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

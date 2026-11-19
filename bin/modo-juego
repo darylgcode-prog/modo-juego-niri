@@ -1,0 +1,1057 @@
+#!/usr/bin/env bash
+# modo-juego — deja el equipo libre para jugar y después lo devuelve a como estaba.
+#
+#   modo-juego              alterna (es lo que hace el atajo Mod+Alt+G)
+#   modo-juego activar      cierra lo que sobra
+#   modo-juego desactivar   vuelve a levantar lo que se cerró
+#   modo-juego estado       dice si está activo y qué tiene anotado
+#   modo-juego simular      muestra qué cerraría, sin tocar nada
+#   modo-juego lanzador     abre o cierra el lanzador de juegos (Mod+Alt+J)
+#   modo-juego animacion    muestra la entrada y el lanzador, sin cerrar nada
+#   modo-juego salida       muestra la secuencia de salida, con datos de ejemplo
+#   modo-juego companero siguiente|anterior|bajar|subir|preguntar
+#                           maneja el compañero del segundo monitor (lo usan los atajos)
+#   modo-juego caratulas    busca las carátulas que falten (Steam y SteamGridDB)
+#   modo-juego clave-steamgriddb   guarda tu clave de SteamGridDB (te la pide)
+#                           (también se hace desde el lanzador: F2, Ajustes)
+#   modo-juego agregar "Nombre" /ruta/al/ejecutable [--emulador] [--icono /ruta.png]
+#                           suma un juego (o emulador) al lanzador
+#
+# Para cambiar qué se cierra, edita las listas de abajo o crea
+# ~/.config/modo-juego/config.sh con las mismas variables.
+set -u
+
+# ─────────────────────────── Qué se cierra ───────────────────────────
+
+# Ventanas que NO se tocan, según su app-id (expresión regular, sin
+# distinguir mayúsculas). Las ventanas sin app-id tampoco se tocan.
+VENTANAS_QUE_SE_QUEDAN='^(steam.*|lutris|net\.lutris\..*|hydra.*|heroic.*|gamescope.*|.*\.exe|wine.*|org\.opengamingcollective\..*|rog-control-center.*)$'
+
+# "si": además de los programas de la lista, le pide cerrarse a cualquier
+# otra ventana abierta. Es un cierre amable: si un programa pregunta por
+# cambios sin guardar, se queda abierto esperando tu respuesta.
+CERRAR_OTRAS_VENTANAS=si
+
+# Programas que se cierran completos (con todos sus procesos).
+#   nombre | cómo encontrarlo (argumentos de pgrep) | comando para reabrirlo
+# Sin comando = no se reabre al desactivar. Se cierran en este orden.
+PROGRAMAS=(
+  "Chrome|-x chrome|google-chrome-stable"
+  "Chromium|-x chromium|chromium"
+  "Firefox|-x firefox|firefox"
+  "Spotify|-x spotify|spotify"
+)
+
+# Servicios y temporizadores del usuario que se detienen (admite comodines).
+# Por ejemplo: 'syncthing.service' 'rclone-*.service' 'mi-respaldo.timer'
+SERVICIOS_USUARIO=()
+
+# Servicios del sistema que se detienen. Piden tu contraseña. Solo se
+# tocan los que estén activos; deja la lista vacía para no pedir nada.
+SERVICIOS_SISTEMA=(
+  docker.socket docker.service containerd.service
+  cups.socket cups.service
+)
+
+# "si": antes de detener Docker apaga los contenedores con calma y anota
+# cuáles eran, para volver a encenderlos al desactivar.
+DETENER_CONTENEDORES=si
+
+# Perfil de energía mientras se juega (vacío = no tocarlo).
+PERFIL_ENERGIA=performance
+
+# "no" = sin notificaciones.
+AVISAR=si
+
+# Entrada animada al activar, y lanzador de juegos al terminar.
+ANIMACION=si
+# "no" = la entrada va sin sonido.
+SONIDO=si
+# "si": cada vez que se abre el lanzador busca en Steam, por detrás, las
+# carátulas de los juegos que no tengan. Se ven la vez siguiente.
+CARATULAS_AUTO=si
+
+# El teclado destella con el golpe de la entrada y queda de este color
+# mientras se juega; al salir vuelve a como estaba.
+TECLADO=si
+COLOR_TECLADO=19d9ff
+# Silencia las notificaciones mientras dura el modo juego.
+NO_MOLESTAR=si
+# "si": apaga las demás pantallas y deja solo la que estás usando.
+APAGAR_OTRAS_PANTALLAS=no
+# Muestra FPS y temperaturas (MangoHud) en los juegos abiertos desde el
+# lanzador. Se oculta y se muestra con Shift derecho + F12.
+HUD=si
+
+# Órdenes propias al activar y al desactivar (una línea de shell cada una;
+# vacío = nada). Sirven para lo que sea particular de tu equipo. Pueden
+# usar "$DIR" (carpeta de estado) para dejarse una marca entre una y otra.
+AL_ACTIVAR=''
+AL_DESACTIVAR=''
+
+# Compañero de juego: al abrir un juego desde el lanzador, el otro monitor
+# muestra sus guías, tus notas, la sesión y un asistente. Necesita dos
+# pantallas encendidas.
+COMPANERO=si
+# Modelo del asistente: opus, sonnet o haiku (de más capaz a más barato).
+ASISTENTE_MODELO=opus
+# "si": cada pregunta lleva una captura de la pantalla del juego.
+ASISTENTE_CAPTURA=si
+# "si": al cerrar un juego o un emulador abierto desde el lanzador, el
+# lanzador vuelve a aparecer.
+VOLVER_AL_LANZADOR=si
+
+# ──────────────────────────── Preparación ────────────────────────────
+
+CONFIG="${MODO_JUEGO_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/config.sh}"
+# shellcheck source=/dev/null
+[[ -f $CONFIG ]] && source "$CONFIG"
+# Lo que se cambia desde la pantalla de Ajustes del lanzador (F2). Va en
+# un archivo aparte y se lee al final, para que mande sobre lo de arriba.
+AJUSTES="$(dirname "$CONFIG")/ajustes.sh"
+# shellcheck source=/dev/null
+[[ -f $AJUSTES ]] && source "$AJUSTES"
+ARCHIVO_CLAVE="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/steamgriddb.clave"
+
+DIR="${MODO_JUEGO_ESTADO:-${XDG_STATE_HOME:-$HOME/.local/state}/modo-juego}"
+ESTADO="$DIR/estado"
+REGISTRO="$DIR/registro.log"
+SIMULAR=0
+mkdir -p "$DIR"
+CATALOGO="${XDG_CACHE_HOME:-$HOME/.cache}/modo-juego/catalogo.json"
+PARTIDAS="$DIR/partidas.jsonl"
+RESUMEN="$DIR/resumen.json"
+ARCHIVO_HUD="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/MangoHud.conf"
+ARCHIVO_CLAVE_IA="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/anthropic.clave"
+ARCHIVO_GUIAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/guias.conf"
+COMPANERO_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/modo-juego-companero"
+NAVEGADOR_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/navegador"
+PUERTO_GUIAS=9333
+
+decir() {
+  printf '%s\n' "$*"
+  [[ $SIMULAR = 1 ]] || printf '%s  %s\n' "$(date '+%F %T')" "$*" >>"$REGISTRO"
+}
+
+avisar() {
+  [[ $SIMULAR = 1 || $AVISAR != si ]] && return 0
+  notify-send -a "Modo juego" -i applications-games -t 8000 "$1" "${2:-}" 2>/dev/null || true
+}
+
+# Ejecuta el comando, o solo lo muestra si se está simulando.
+hacer() {
+  if [[ $SIMULAR = 1 ]]; then
+    printf '     haría: %s\n' "$*"
+  else
+    "$@"
+  fi
+}
+
+memoria_libre() { awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo; }
+arranque() { cat /proc/sys/kernel/random/boot_id; }
+anotado() { [[ -f $ESTADO ]] && awk -F'\t' -v k="$1" '$1==k {print $2}' "$ESTADO"; }
+esta_activo() { [[ -f $ESTADO ]] && [[ "$(anotado arranque)" == "$(arranque)" ]]; }
+
+# Unidades activas que calzan con los patrones dados. Sin patrones no
+# devuelve nada (systemctl sin patrón las listaría todas).
+unidades_activas() {
+  local ambito=$1
+  shift
+  (($#)) || return 0
+  if [[ $ambito = usuario ]]; then
+    systemctl --user list-units --state=active --plain --no-legend "$@" 2>/dev/null
+  else
+    systemctl list-units --state=active --plain --no-legend "$@" 2>/dev/null
+  fi | awk '{print $1}'
+}
+
+# Comando para reabrir un programa de la lista, por su nombre.
+comando_de() {
+  local p nombre patron reabrir
+  for p in "${PROGRAMAS[@]}"; do
+    IFS='|' read -r nombre patron reabrir <<<"$p"
+    [[ $nombre == "$1" ]] && printf '%s' "$reabrir" && return 0
+  done
+  return 1
+}
+
+# Ventanas abiertas que no están en la lista de las que se quedan.
+ventanas_sobrantes() {
+  niri msg -j windows 2>/dev/null | jq -r --arg q "$VENTANAS_QUE_SE_QUEDAN" '
+    .[] | select((.app_id // "") != "")
+        | select(.app_id | test($q; "i") | not)
+        | "\(.id)\t\(.app_id)\t\(.title // "" | .[0:50])"' 2>/dev/null
+}
+
+# Cierra un programa completo. Cada app corre en su propio grupo de
+# systemd (app-*.scope): detener el grupo se lleva todos sus procesos.
+# Lo que cuelga de niri o de la barra se mata proceso por proceso.
+cerrar_programa() {
+  local nombre=$1 patron=$2 p grupo
+  local -a pids=() sueltos=()
+  local -A grupos=()
+  # shellcheck disable=SC2086
+  mapfile -t pids < <(pgrep $patron)
+  ((${#pids[@]})) || return 1
+  for p in "${pids[@]}"; do
+    grupo=$(sed -n 's|.*/\(app-[^/]*\.scope\)$|\1|p' "/proc/$p/cgroup" 2>/dev/null)
+    # El grupo se detiene entero solo si es de este programa (termina en
+    # el número de uno de sus procesos). Un proceso que vive dentro del
+    # grupo de otra app (p. ej. un proceso lanzado desde una terminal) se mata
+    # solo, sin llevarse a la app que lo contiene.
+    if [[ $grupo =~ -([0-9]+)\.scope$ && " ${pids[*]} " == *" ${BASH_REMATCH[1]} "* ]]; then
+      grupos[$grupo]=1
+    else
+      sueltos+=("$p")
+    fi
+  done
+  decir " · $nombre"
+  for grupo in "${!grupos[@]}"; do
+    if [[ $SIMULAR = 1 ]]; then
+      hacer systemctl --user stop "$grupo"
+    else
+      timeout 12 systemctl --user stop "$grupo" 2>/dev/null ||
+        systemctl --user kill --signal=KILL "$grupo" 2>/dev/null
+    fi
+  done
+  if ((${#sueltos[@]})); then
+    hacer kill "${sueltos[@]}" 2>/dev/null
+    if [[ $SIMULAR != 1 ]]; then
+      sleep 2
+      kill -KILL "${sueltos[@]}" 2>/dev/null
+    fi
+  fi
+  return 0
+}
+
+# ───────────────────── Entrada animada y lanzador ────────────────────
+
+ESCENA="${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/modo-juego"
+LIBERADOS="$DIR/liberados"
+
+hay_escena() { [[ $ANIMACION = si && -f $ESCENA/shell.qml ]] && command -v qs >/dev/null; }
+escena_abierta() { pgrep -fx "qs -p $ESCENA" >/dev/null; }
+cerrar_escena() { pkill -fx "qs -p $ESCENA" 2>/dev/null; }
+
+# Abre la escena: «intro» (animación y después lanzador) o «lanzador».
+# Va lanzada por niri para que quede suelta y sobreviva a este script.
+# El segundo argumento, «teclado», hace que el golpe de la entrada también
+# destelle el teclado (solo al activar de verdad, no en la muestra).
+abrir_escena() {
+  local pantalla gpu teclado=no
+  [[ ${2:-} = teclado ]] && teclado=si
+  cerrar_escena
+  [[ $1 = salida ]] || modo-juego-catalogo >/dev/null 2>>"$REGISTRO"
+  pantalla=$(niri msg -j focused-output 2>/dev/null | jq -r '.name // empty')
+  gpu=$(lspci 2>/dev/null | grep -oE '(RTX|GTX|RX) [0-9]+( Ti| XT)?' | head -1)
+  niri msg action spawn -- env MJ_MODO="$1" MJ_PANTALLA="$pantalla" \
+    MJ_RESULTADO="$LIBERADOS" MJ_RESUMEN="$RESUMEN" MJ_SONIDO="$SONIDO" \
+    MJ_TECLADO="$teclado" MJ_GPU="$gpu" qs -p "$ESCENA"
+  [[ $1 != salida && $CARATULAS_AUTO = si ]] && niri msg action spawn -- modo-juego-caratulas
+  return 0
+}
+
+# Lo que la entrada muestra en vivo: cuánto se ha cerrado y liberado.
+CERRADOS=0
+MEM_ANTES=0
+progreso() {   # $1 = true|false (terminó)   $2 = aviso para el lanzador
+  [[ $SIMULAR = 1 ]] && return 0
+  jq -cn --argjson c "$CERRADOS" --argjson l "$(($(memoria_libre) - MEM_ANTES))" \
+    --argjson listo "${1:-false}" --arg aviso "${2:-}" \
+    '{cerrados: $c, liberados: $l, listo: $listo, aviso: $aviso}' >"$LIBERADOS.tmp" 2>/dev/null &&
+    mv "$LIBERADOS.tmp" "$LIBERADOS"
+}
+
+# ─────────────────────────── Teclado (ASUS) ──────────────────────────
+
+hay_teclado() { [[ $TECLADO = si ]] && command -v asusctl >/dev/null; }
+
+# Cómo está el teclado ahora, según asusd: «Modo color1 color2 velocidad».
+teclado_actual() {
+  python3 - <<'PY' 2>/dev/null
+import glob, re
+for ruta in sorted(glob.glob("/etc/asusd/aura*.ron")):
+    t = open(ruta, encoding="utf-8", errors="replace").read()
+    modo = re.search(r"current_mode:\s*(\w+)", t)
+    if not modo:
+        continue
+    bloque = re.search(r"\b%s:\s*\((.*?)\n        \)," % modo.group(1), t, re.S)
+    def color(nombre):
+        m = bloque and re.search(nombre + r":\s*\(\s*r:\s*(\d+),\s*g:\s*(\d+),\s*b:\s*(\d+)", bloque.group(1))
+        return "%02x%02x%02x" % tuple(map(int, m.groups())) if m else "ffffff"
+    vel = bloque and re.search(r"speed:\s*(\w+)", bloque.group(1))
+    print(modo.group(1), color("colour1"), color("colour2"), vel.group(1) if vel else "Med")
+    break
+PY
+}
+
+teclado_poner() {   # modo color1 color2 velocidad
+  local modo=${1:-Static} c1=${2:-ffffff} c2=${3:-000000} vel=${4:-Med} kebab
+  case $modo in
+    Static) asusctl aura effect static -c "$c1" ;;
+    Breathe) asusctl aura effect breathe --colour "$c1" --colour2 "$c2" --speed "${vel,,}" ;;
+    *)
+      # Otros efectos: se intenta con su nombre; si no, queda el color fijo.
+      kebab=$(sed -E 's/([a-z])([A-Z])/\1-\2/g' <<<"$modo" | tr '[:upper:]' '[:lower:]')
+      asusctl aura effect "$kebab" -c "$c1" || asusctl aura effect static -c "$c1"
+      ;;
+  esac >/dev/null 2>&1
+}
+
+# El destello del golpe: blanco, magenta y queda en el color de juego.
+teclado_impacto() {
+  hay_teclado || return 0
+  teclado_poner Static ffffff
+  sleep 0.12
+  teclado_poner Static ff2a9e
+  sleep 0.14
+  teclado_poner Static "$COLOR_TECLADO"
+}
+
+# El primer navegador basado en Chromium que haya, para las guías.
+navegador_guias() {
+  local n
+  for n in google-chrome-stable chromium brave vivaldi-stable microsoft-edge-stable; do
+    command -v "$n" >/dev/null && echo "$n" && return 0
+  done
+  return 1
+}
+
+# ───────────────── Compañero de juego (segundo monitor) ──────────────
+
+# Las guías de un juego, como JSON [{titulo, url}]. Salen de guias.conf:
+# una sección por juego, con su nombre tal como sale en el lanzador o con
+# su id, sin distinguir mayúsculas. Si no tiene sección, dos búsquedas.
+guias_de() {
+  local id=$1 nombre=$2 lineas=''
+  [[ -f $ARCHIVO_GUIAS ]] && lineas=$(awk -v s="[${id,,}]" -v n="[${nombre,,}]" '
+    /^[[:space:]]*#/ { next }
+    /^\[/ { t = tolower($0); sub(/[ \t]+$/, "", t); en = (t == s || t == n); next }
+    en && /=/ {
+      i = index($0, "="); t = substr($0, 1, i - 1); u = substr($0, i + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", t); gsub(/^[ \t]+|[ \t]+$/, "", u)
+      if (t != "" && u ~ /^https?:\/\//) print t "\t" u
+    }' "$ARCHIVO_GUIAS")
+  if [[ -n $lineas ]]; then
+    jq -Rnc '[inputs | split("\t") | {titulo: .[0], url: .[1]}]' <<<"$lineas"
+  else
+    jq -nc --arg n "$nombre" '[
+      {titulo: "Guía (búsqueda)", url: ("https://www.google.com/search?q=" + ($n + " guía" | @uri))},
+      {titulo: "Videos", url: ("https://www.youtube.com/results?search_query=" + ($n + " guía" | @uri))}]'
+  fi
+}
+
+companero_cerrar() {
+  pkill -fx "qs -p $COMPANERO_DIR" 2>/dev/null
+  # El navegador de guías usa un perfil propio: se reconoce por su carpeta.
+  pkill -f -- "--user-data-dir=$NAVEGADOR_DIR" 2>/dev/null
+  rm -f -- "$DIR/historial-asistente.json"
+  return 0
+}
+
+# Abre el compañero en la pantalla que no usa el juego. Devuelve 1 si no
+# corresponde (apagado en Ajustes, o no hay una segunda pantalla).
+companero_abrir() {
+  local id=$1 nombre=$2 del_juego otra guias caratula u navegador
+  local -a urls=()
+  [[ $COMPANERO = si && -f $COMPANERO_DIR/shell.qml ]] || return 1
+  del_juego=$(niri msg -j focused-output 2>/dev/null | jq -r '.name // empty')
+  otra=$(niri msg -j outputs 2>/dev/null |
+    jq -r --arg e "$del_juego" 'to_entries[] | select(.value.logical != null and .key != $e) | .key' | head -1)
+  [[ -n $del_juego && -n $otra ]] || return 1
+  companero_cerrar
+  guias=$(guias_de "$id" "$nombre")
+  caratula=$(jq -r --arg i "$id" '.juegos[]? | select(.id == $i) | .caratula // ""' "$CATALOGO" 2>/dev/null | head -1)
+  mapfile -t urls < <(jq -r '.[].url' <<<"$guias")
+
+  if ((${#urls[@]})) && navegador=$(navegador_guias); then
+    # Perfil y puerto de control propios (solo este equipo puede hablarle):
+    # así el panel cambia de pestaña y desplaza sin quitarle el foco al juego.
+    niri msg action spawn -- "$navegador" --user-data-dir="$NAVEGADOR_DIR" \
+      --remote-debugging-port="$PUERTO_GUIAS" "--remote-allow-origins=*" --class=modo-juego-guias \
+      --no-first-run --no-default-browser-check --hide-crash-restore-bubble --new-window "${urls[@]}"
+    # Cuando aparezca su ventana, a la otra pantalla.
+    (
+      for _ in $(seq 1 80); do
+        u=$(niri msg -j windows 2>/dev/null | jq -r '[.[] | select(.app_id == "modo-juego-guias")][0].id // empty')
+        if [[ -n $u ]]; then
+          niri msg action move-window-to-monitor --id "$u" "$otra"
+          break
+        fi
+        sleep 0.25
+      done
+    ) >/dev/null 2>&1 &
+  else
+    guias='[]'
+  fi
+
+  niri msg action spawn -- env MJC_PANTALLA="$otra" MJC_PANTALLA_JUEGO="$del_juego" MJC_ID="$id" \
+    MJC_NOMBRE="$nombre" MJC_CARATULA="$caratula" MJC_GUIAS="$guias" MJC_PUERTO="$PUERTO_GUIAS" \
+    MJC_NOTAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/notas/$id.md" \
+    MJC_HISTORIAL="$DIR/historial-asistente.json" MJC_MODELO="$ASISTENTE_MODELO" \
+    MJC_CAPTURA="$ASISTENTE_CAPTURA" qs -p "$COMPANERO_DIR"
+  return 0
+}
+
+# Una pregunta al asistente (llega por la entrada estándar). Con
+# «--captura PANTALLA» le adjunta una captura de esa pantalla, que se borra
+# apenas responde.
+preguntar() {
+  local -a args=()
+  local salida='' captura='' rc=0
+  while (($#)); do
+    case $1 in
+      --captura) salida=${2:-}; shift ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  if [[ -n $salida ]] && command -v grim >/dev/null; then
+    captura="${XDG_RUNTIME_DIR:-/tmp}/modo-juego-captura-$$.jpg"
+    if (umask 077 && grim -o "$salida" -t jpeg -q 85 "$captura") 2>/dev/null; then
+      magick "$captura" -resize '1568x1568>' "$captura" 2>/dev/null
+      args+=(--imagen "$captura")
+    fi
+  fi
+  modo-juego-asistente "${args[@]}" || rc=$?
+  [[ -n $captura ]] && rm -f -- "$captura"
+  return $rc
+}
+
+# Steam devuelve el control apenas se le pide abrir un juego: se espera a
+# que aparezca el proceso del juego y a que termine.
+esperar_steam() {
+  local appid=$1 i visto=0
+  for ((i = 0; i < 43200; i++)); do
+    if grep -qsazx "SteamAppId=$appid" /proc/[0-9]*/environ 2>/dev/null; then
+      visto=1
+    elif ((visto)) || ((i > 60)); then
+      break
+    fi
+    sleep 2
+  done
+}
+
+# ──────────────────── Partidas: qué se juega y cuánto ─────────────────
+
+# Lanza una entrada del catálogo, espera a que termine y anota la partida.
+jugar() {
+  local fila=${1:-} id=${2:-} cmd inicio nombre con_companero=0
+  cmd=$(jq -r --arg f "$fila" --arg i "$id" '.[$f][]? | select(.id == $i) | .cmd' "$CATALOGO" 2>/dev/null | head -1)
+  nombre=$(jq -r --arg f "$fila" --arg i "$id" '.[$f][]? | select(.id == $i) | .nombre' "$CATALOGO" 2>/dev/null | head -1)
+  if [[ -z $cmd ]]; then
+    echo "No encuentro «$id» en el catálogo." >&2
+    return 1
+  fi
+  if [[ $fila = juegos && $HUD = si && -f $ARCHIVO_HUD ]] && command -v mangohud >/dev/null; then
+    export MANGOHUD=1 MANGOHUD_CONFIGFILE="$ARCHIVO_HUD"
+  fi
+  # El compañero solo acompaña a los juegos, no a lanzadores ni emuladores sueltos.
+  if [[ $fila = juegos ]] && companero_abrir "$id" "$nombre"; then
+    con_companero=1
+  fi
+  inicio=$(date +%s)
+  # Se anota al partir (así «lo último que jugaste» vale aunque esto se
+  # corte) y otra vez al terminar, con lo que duró.
+  jq -cn --arg id "$id" --arg f "$fila" --argjson t "$inicio" '{id: $id, fila: $f, inicio: $t, segundos: 0}' >>"$PARTIDAS"
+  sh -c "$cmd"
+  [[ $cmd =~ steam://rungameid/([0-9]+) ]] && esperar_steam "${BASH_REMATCH[1]}"
+  ((con_companero)) && companero_cerrar
+  jq -cn --arg id "$id" --arg f "$fila" --argjson t "$inicio" --argjson s "$(($(date +%s) - inicio))" \
+    '{id: $id, fila: $f, inicio: $t, segundos: $s}' >>"$PARTIDAS"
+
+  # De vuelta al lanzador, ya con la partida anotada (lo recién jugado
+  # queda primero). No con los lanzadores: Steam o Battle.net devuelven el
+  # control apenas abren, y el lanzador les caería encima.
+  if [[ $VOLVER_AL_LANZADOR = si && $fila != lanzadores && -f $ESCENA/shell.qml ]]; then
+    abrir_escena lanzador
+  fi
+}
+
+# Resumen de la sesión para la secuencia de salida.
+escribir_resumen() {   # $1 = desde (segundos)   resto = lo que vuelve a abrirse
+  local desde=$1
+  shift
+  local ahora
+  ahora=$(date +%s)
+  [[ -f $PARTIDAS ]] || : >"$PARTIDAS"
+  jq -cn --argjson desde "$desde" --argjson ahora "$ahora" --args \
+    --slurpfile cat <(cat "$CATALOGO" 2>/dev/null || echo '{}') \
+    --slurpfile partidas "$PARTIDAS" '
+    ($cat[0] // {}) as $c
+    | ([$c.juegos[]?, $c.lanzadores[]?, $c.emuladores[]?] | map({key: .id, value: .nombre}) | from_entries) as $nombres
+    | {
+        minutos: ((($ahora - $desde) / 60) | floor),
+        vuelven: $ARGS.positional,
+        partidas: ([$partidas[] | select(.inicio >= $desde and .segundos > 0)]
+          | group_by(.id)
+          | map({nombre: ($nombres[.[0].id] // .[0].id), minutos: ((map(.segundos) | add) / 60 | floor)})
+          | sort_by(-.minutos))
+      }' "$@" >"$RESUMEN" 2>>"$REGISTRO"
+}
+
+# Guarda la clave de SteamGridDB (solo legible por el usuario) y la prueba.
+guardar_clave() {
+  local clave=${1//[[:space:]]/}
+  if [[ -z $clave ]]; then
+    echo "No llegó ninguna clave; no cambié nada."
+    return 1
+  fi
+  mkdir -p "$(dirname "$ARCHIVO_CLAVE")"
+  (umask 077 && printf '%s\n' "$clave" >"$ARCHIVO_CLAVE")
+  chmod 600 "$ARCHIVO_CLAVE"
+  # Una clave rechazada no se deja guardada; si no se pudo comprobar
+  # (sin internet), sí, y se probará al usarla.
+  local rc=0
+  modo-juego-caratulas --probar-clave || rc=$?
+  ((rc == 1)) && rm -f -- "${ARCHIVO_CLAVE:?}"
+  return $rc
+}
+
+# Los ajustes de sí o no que maneja la pantalla del lanzador, y el nombre
+# con que cada uno viaja en el JSON.
+AJUSTABLES=(SONIDO:sonido ANIMACION:animacion CARATULAS_AUTO:caratulasAuto TECLADO:teclado
+  NO_MOLESTAR:noMolestar APAGAR_OTRAS_PANTALLAS:apagarPantallas HUD:hud
+  COMPANERO:companero ASISTENTE_CAPTURA:captura VOLVER_AL_LANZADOR:volver)
+
+poner_ajuste() {
+  local nombre=${1:-} valor=${2:-} par nombres='ASISTENTE_MODELO' ok=0
+  for par in "${AJUSTABLES[@]}"; do
+    [[ ${par%%:*} == "$nombre" ]] && ok=1
+    nombres+="|${par%%:*}"
+  done
+  if [[ $nombre == ASISTENTE_MODELO ]]; then
+    case $valor in
+      opus | sonnet | haiku) ;;
+      *) echo "El modelo tiene que ser opus, sonnet o haiku." >&2; return 2 ;;
+    esac
+  elif ((!ok)); then
+    echo "Ajuste desconocido: $nombre (valen: ${nombres//|/, })" >&2
+    return 2
+  else
+    case $valor in
+      si | no) ;;
+      *) echo "El valor tiene que ser si o no." >&2; return 2 ;;
+    esac
+  fi
+  mkdir -p "$(dirname "$AJUSTES")"
+  {
+    echo "# Lo escribe la pantalla de Ajustes del lanzador (F2). No hace falta editarlo a mano."
+    [[ -f $AJUSTES ]] && grep -E "^($nombres)=[a-z]+\$" "$AJUSTES" | grep -v "^$nombre="
+    echo "$nombre=$valor"
+  } >"$AJUSTES.nuevo" && mv "$AJUSTES.nuevo" "$AJUSTES"
+}
+
+# Los ajustes vigentes, en JSON, para que el lanzador los muestre.
+mostrar_ajustes() {
+  local par json='' clave=false clave_ia=false pantallas
+  [[ -s $ARCHIVO_CLAVE ]] && clave=true
+  [[ -s $ARCHIVO_CLAVE_IA ]] && clave_ia=true
+  pantallas=$(niri msg -j outputs 2>/dev/null | jq '[to_entries[] | select(.value.logical != null)] | length' 2>/dev/null)
+  for par in "${AJUSTABLES[@]}"; do
+    local variable=${par%%:*}
+    json+="\"${par##*:}\": $([[ ${!variable} = si ]] && echo true || echo false), "
+  done
+  printf '{%s"modelo": "%s", "clave": %s, "claveIa": %s, "hayTeclado": %s, "hayHud": %s, "pantallas": %s}\n' \
+    "$json" "$ASISTENTE_MODELO" "$clave" "$clave_ia" \
+    "$(command -v asusctl >/dev/null && echo true || echo false)" \
+    "$(command -v mangohud >/dev/null && echo true || echo false)" "${pantallas:-1}"
+}
+
+# Guarda la clave de Anthropic (solo legible por el usuario) y la prueba.
+guardar_clave_ia() {
+  local clave=${1//[[:space:]]/} rc=0
+  if [[ -z $clave ]]; then
+    echo "No llegó ninguna clave; no cambié nada."
+    return 1
+  fi
+  mkdir -p "$(dirname "$ARCHIVO_CLAVE_IA")"
+  (umask 077 && printf '%s\n' "$clave" >"$ARCHIVO_CLAVE_IA")
+  chmod 600 "$ARCHIVO_CLAVE_IA"
+  modo-juego-asistente --probar-clave || rc=$?
+  ((rc == 1)) && rm -f -- "${ARCHIVO_CLAVE_IA:?}"
+  return $rc
+}
+
+# Suma un juego al lanzador creando su acceso en el menú de aplicaciones
+# (el lanzador muestra todo lo que esté en la categoría Juegos).
+agregar_juego() {
+  local nombre='' ejecutable='' icono='' categorias='Game;' clave archivo
+  while (($#)); do
+    case $1 in
+      --emulador) categorias='Game;Emulator;' ;;
+      --icono) icono=${2:-}; shift ;;
+      *) if [[ -z $nombre ]]; then nombre=$1; elif [[ -z $ejecutable ]]; then ejecutable=$1; fi ;;
+    esac
+    shift
+  done
+  if [[ -z $nombre || -z $ejecutable ]]; then
+    echo 'Uso: modo-juego agregar "Nombre" /ruta/al/ejecutable [--emulador] [--icono /ruta.png]' >&2
+    return 2
+  fi
+  ejecutable=$(realpath -- "$ejecutable" 2>/dev/null)
+  if [[ ! -f $ejecutable ]]; then
+    echo "No existe ese archivo." >&2
+    return 1
+  fi
+  if [[ ${ejecutable,,} == *.exe ]]; then
+    echo "Un .exe de Windows necesita su script con Proton (como los de Elden Ring o Pragmata); pásame la ruta de ese script, no la del .exe." >&2
+    return 1
+  fi
+  if [[ ! -x $ejecutable ]]; then
+    echo "Ese archivo no tiene permiso de ejecución (chmod +x)." >&2
+    return 1
+  fi
+  if [[ -n $icono ]]; then
+    icono=$(realpath -- "$icono" 2>/dev/null)
+    [[ -f $icono ]] || { echo "No existe el icono." >&2; return 1; }
+  fi
+  clave=$(printf '%s' "$nombre" | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')
+  [[ -n $clave ]] || { echo "Ese nombre no me sirve para armar el archivo." >&2; return 1; }
+  archivo="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$clave.desktop"
+  if [[ -e $archivo ]]; then
+    echo "Ya existe $archivo: bórralo primero si quieres rehacerlo." >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$archivo")"
+  {
+    echo '[Desktop Entry]'
+    echo 'Type=Application'
+    echo "Name=$nombre"
+    echo "Exec=\"$ejecutable\""
+    echo "Path=$(dirname "$ejecutable")"
+    [[ -n $icono ]] && echo "Icon=$icono"
+    echo "Categories=$categorias"
+    echo 'Terminal=false'
+  } >"$archivo"
+  modo-juego-catalogo
+  echo "Agregado: $nombre"
+  echo "  Acceso:   $archivo (para quitarlo del lanzador, borra ese archivo)"
+  echo "  Carátula: se busca sola en Steam; o deja la tuya en ~/.config/modo-juego/caratulas/$clave.jpg"
+  modo-juego-caratulas --ver --por-nombre | grep -F "$nombre"
+}
+
+# ────────────────────────────── Activar ──────────────────────────────
+
+activar() {
+  local antes despues p nombre patron reabrir perfil='' falla_sistema=0 quedan con_escena=0
+  local teclado='' enfocada inicio_escena=0
+  local -a u_usuario=() u_sistema=() contenedores=() abiertos=() otras=()
+  antes=$(memoria_libre)
+  MEM_ANTES=$antes
+  CERRADOS=0
+  hay_teclado && teclado=$(teclado_actual)
+
+  mapfile -t u_usuario < <(unidades_activas usuario "${SERVICIOS_USUARIO[@]}")
+  mapfile -t u_sistema < <(unidades_activas sistema "${SERVICIOS_SISTEMA[@]}")
+  if [[ $DETENER_CONTENEDORES = si ]] && systemctl -q is-active docker.service; then
+    mapfile -t contenedores < <(timeout 10 docker ps --format '{{.Names}}' 2>/dev/null)
+  fi
+  [[ -n $PERFIL_ENERGIA ]] && perfil=$(powerprofilesctl get 2>/dev/null)
+  for p in "${PROGRAMAS[@]}"; do
+    IFS='|' read -r nombre patron reabrir <<<"$p"
+    # shellcheck disable=SC2086
+    [[ -n $reabrir ]] && pgrep $patron >/dev/null && abiertos+=("$nombre")
+  done
+
+  # Se anota todo antes de tocar nada: si algo falla a medio camino,
+  # «desactivar» igual sabe qué devolver.
+  if [[ $SIMULAR != 1 ]]; then
+    {
+      printf 'arranque\t%s\n' "$(arranque)"
+      printf 'desde\t%s\n' "$(date '+%F %T')"
+      printf 'desde_seg\t%s\n' "$(date +%s)"
+      [[ -n $perfil ]] && printf 'perfil\t%s\n' "$perfil"
+      [[ -n $teclado ]] && printf 'teclado\t%s\n' "$teclado"
+      for p in "${u_usuario[@]}"; do printf 'usuario\t%s\n' "$p"; done
+      for p in "${contenedores[@]}"; do printf 'contenedor\t%s\n' "$p"; done
+      for p in "${abiertos[@]}"; do printf 'programa\t%s\n' "$p"; done
+    } >"$ESTADO"
+  fi
+  decir "== Activando modo juego =="
+  [[ $SIMULAR = 1 ]] || rm -f "$LIBERADOS"
+  hay_escena && con_escena=1
+  # Lo que pide contraseña va primero: la entrada animada cubre toda la
+  # pantalla y taparía la ventana donde se escribe.
+  if ((!con_escena)); then
+    avisar "Modo juego: activando…" "Cerrando lo que no se necesita."
+  elif ((${#u_sistema[@]})); then
+    avisar "Modo juego" "Pon tu contraseña para apagar Docker y los servicios del sistema."
+  fi
+
+  if ((${#contenedores[@]})); then
+    decir "Contenedores de Docker:"
+    for p in "${contenedores[@]}"; do decir " · $p"; done
+    hacer timeout 90 docker stop -t 30 "${contenedores[@]}" >/dev/null
+    CERRADOS=$((CERRADOS + ${#contenedores[@]}))
+  fi
+
+  if ((${#u_sistema[@]})); then
+    decir "Servicios del sistema (pide contraseña):"
+    for p in "${u_sistema[@]}"; do decir " · $p"; done
+    if hacer timeout 180 systemctl stop "${u_sistema[@]}"; then
+      [[ $SIMULAR = 1 ]] || for p in "${u_sistema[@]}"; do printf 'sistema\t%s\n' "$p" >>"$ESTADO"; done
+      CERRADOS=$((CERRADOS + ${#u_sistema[@]}))
+    else
+      falla_sistema=1
+      decir "   No se detuvieron (sin contraseña o cancelado)."
+    fi
+  fi
+
+  if [[ -n $AL_ACTIVAR ]]; then
+    decir "Orden propia al activar."
+    hacer eval "$AL_ACTIVAR"
+  fi
+
+  progreso false
+  if ((con_escena)); then
+    decir "Entrada animada y lanzador."
+    hacer abrir_escena intro teclado
+    inicio_escena=$SECONDS
+  elif [[ -n $teclado ]]; then
+    decir "Teclado: color de juego."
+    hacer teclado_poner Static "$COLOR_TECLADO"
+  fi
+
+  if ((${#u_usuario[@]})); then
+    decir "Servicios del usuario:"
+    for p in "${u_usuario[@]}"; do decir " · $p"; done
+    hacer systemctl --user stop "${u_usuario[@]}"
+    CERRADOS=$((CERRADOS + ${#u_usuario[@]}))
+    progreso false
+  fi
+
+  if [[ -n $PERFIL_ENERGIA && -n $perfil && $perfil != "$PERFIL_ENERGIA" ]]; then
+    decir "Perfil de energía: $perfil → $PERFIL_ENERGIA"
+    hacer powerprofilesctl set "$PERFIL_ENERGIA"
+  fi
+
+  if [[ $CERRAR_OTRAS_VENTANAS = si ]]; then
+    decir "Ventanas:"
+    while IFS=$'\t' read -r id app titulo; do
+      [[ -n $id ]] || continue
+      decir " · $app — $titulo"
+      hacer niri msg action close-window --id "$id"
+      CERRADOS=$((CERRADOS + 1))
+      progreso false
+    done < <(ventanas_sobrantes)
+    [[ $SIMULAR = 1 ]] || sleep 3
+  fi
+
+  decir "Programas:"
+  for p in "${PROGRAMAS[@]}"; do
+    IFS='|' read -r nombre patron reabrir <<<"$p"
+    if cerrar_programa "$nombre" "$patron"; then
+      CERRADOS=$((CERRADOS + 1))
+      progreso false
+    fi
+  done
+
+  if [[ $APAGAR_OTRAS_PANTALLAS = si ]]; then
+    enfocada=$(niri msg -j focused-output 2>/dev/null | jq -r '.name // empty')
+    mapfile -t otras < <(niri msg -j outputs 2>/dev/null |
+      jq -r --arg e "$enfocada" 'to_entries[] | select(.value.logical != null and .key != $e) | .key')
+    if [[ -n $enfocada ]] && ((${#otras[@]})); then
+      decir "Otras pantallas (se apagan): ${otras[*]}"
+      if [[ $SIMULAR != 1 ]]; then
+        # Se espera a que termine la entrada, que sale en todas.
+        ((con_escena)) && while ((SECONDS - inicio_escena < 5)); do sleep 0.5; done
+        for p in "${otras[@]}"; do
+          printf 'pantalla\t%s\n' "$p" >>"$ESTADO"
+          niri msg output "$p" off
+        done
+      fi
+    fi
+  fi
+
+  if [[ $SIMULAR = 1 ]]; then
+    decir "== Simulación: no se cerró nada =="
+    return 0
+  fi
+
+  sleep 1
+  despues=$(memoria_libre)
+  quedan=0
+  [[ $CERRAR_OTRAS_VENTANAS = si ]] && quedan=$(ventanas_sobrantes | grep -c .)
+  local detalle="Memoria libre: $antes → $despues MB." aviso=''
+  ((quedan)) && aviso+="Quedaron $quedan ventanas abiertas (¿algo sin guardar?). "
+  ((falla_sistema)) && aviso+="Docker, impresión y AnyDesk siguen encendidos: faltó la contraseña. "
+  detalle+=" $aviso"
+  detalle+="Mod+Alt+G para volver."
+  decir "== Modo juego activado. $detalle =="
+  # Con el lanzador abierto, la memoria liberada y los avisos se ven ahí;
+  # sin lanzador, van en una notificación.
+  progreso true "$aviso"
+  ((con_escena)) || avisar "Modo juego activado" "$detalle"
+
+  # Al final, para no silenciar los avisos de arriba.
+  if [[ $NO_MOLESTAR = si ]] && command -v dms >/dev/null; then
+    if [[ "$(dms ipc call notifications getDoNotDisturbUntil 2>/dev/null)" == "0" ]]; then
+      decir "Notificaciones: no molestar."
+      dms ipc call notifications enableDoNotDisturbFor 720 >/dev/null 2>&1 && printf 'nomolestar\t1\n' >>"$ESTADO"
+    fi
+  fi
+}
+
+# ───────────────────────────── Desactivar ────────────────────────────
+
+desactivar() {
+  local p cmd perfil i falla_sistema=0 teclado desde
+  local -a u_usuario=() u_sistema=() contenedores=() abiertos=() palabras=() pantallas=() vuelven=()
+  if [[ ! -f $ESTADO ]]; then
+    decir "El modo juego no está activo."
+    avisar "Modo juego" "No estaba activo."
+    return 0
+  fi
+  mapfile -t u_usuario < <(anotado usuario)
+  mapfile -t u_sistema < <(anotado sistema)
+  mapfile -t contenedores < <(anotado contenedor)
+  mapfile -t abiertos < <(anotado programa)
+  perfil=$(anotado perfil)
+  teclado=$(anotado teclado)
+  desde=$(anotado desde_seg)
+  mapfile -t pantallas < <(anotado pantalla)
+
+  decir "== Desactivando modo juego =="
+  cerrar_escena
+
+  # Primero lo que hace falta para ver y oír el resto: pantallas y avisos.
+  if ((${#pantallas[@]})); then
+    decir "Pantallas (se encienden): ${pantallas[*]}"
+    for p in "${pantallas[@]}"; do niri msg output "$p" on; done
+  fi
+  if [[ -n $(anotado nomolestar) ]]; then
+    decir "Notificaciones: vuelven."
+    dms ipc call notifications disableDoNotDisturb >/dev/null 2>&1
+  fi
+  hay_escena || avisar "Modo juego: desactivando…" "Volviendo a levantar lo que se cerró."
+
+  if ((${#u_sistema[@]})); then
+    decir "Servicios del sistema (pide contraseña):"
+    for p in "${u_sistema[@]}"; do decir " · $p"; done
+    if ! timeout 180 systemctl start "${u_sistema[@]}"; then
+      falla_sistema=1
+      decir "   No se pudieron encender (sin contraseña o cancelado)."
+    fi
+  fi
+
+  if ((${#contenedores[@]})) && ((!falla_sistema)); then
+    decir "Contenedores de Docker:"
+    for p in "${contenedores[@]}"; do decir " · $p"; done
+    for ((i = 0; i < 20; i++)); do
+      timeout 5 docker info >/dev/null 2>&1 && break
+      sleep 1
+    done
+    timeout 120 docker start "${contenedores[@]}" >/dev/null 2>>"$REGISTRO" || falla_sistema=1
+  fi
+
+  # La secuencia de salida va después de la contraseña (la taparía) y
+  # mientras se reabre lo demás.
+  if hay_escena; then
+    vuelven=("${abiertos[@]}")
+    ((${#contenedores[@]})) && ((!falla_sistema)) && vuelven+=("Docker")
+    escribir_resumen "${desde:-$(date +%s)}" "${vuelven[@]}"
+    decir "Secuencia de salida."
+    abrir_escena salida
+  fi
+
+  if [[ -n $teclado ]]; then
+    decir "Teclado: vuelve a como estaba ($teclado)."
+    # shellcheck disable=SC2086
+    teclado_poner $teclado
+  fi
+  if [[ -n $AL_DESACTIVAR ]]; then
+    decir "Orden propia al desactivar."
+    eval "$AL_DESACTIVAR"
+  fi
+
+  if ((${#u_usuario[@]})); then
+    decir "Servicios del usuario:"
+    for p in "${u_usuario[@]}"; do decir " · $p"; done
+    systemctl --user start "${u_usuario[@]}" 2>>"$REGISTRO"
+  fi
+
+  if [[ -n $perfil && "$(powerprofilesctl get 2>/dev/null)" != "$perfil" ]]; then
+    decir "Perfil de energía: vuelve a $perfil"
+    powerprofilesctl set "$perfil"
+  fi
+
+  if ((${#abiertos[@]})); then
+    decir "Programas:"
+    for p in "${abiertos[@]}"; do
+      cmd=$(comando_de "$p") || continue
+      [[ -n $cmd ]] || continue
+      decir " · $p"
+      read -ra palabras <<<"$cmd"
+      niri msg action spawn -- "${palabras[@]}"
+    done
+  fi
+
+  if ((falla_sistema)); then
+    # Queda anotado solo lo pendiente, para reintentar con el mismo atajo.
+    {
+      printf 'arranque\t%s\n' "$(arranque)"
+      printf 'desde\t%s\n' "$(anotado desde)"
+      for p in "${u_sistema[@]}"; do printf 'sistema\t%s\n' "$p"; done
+      for p in "${contenedores[@]}"; do printf 'contenedor\t%s\n' "$p"; done
+    } >"$ESTADO.nuevo" && mv "$ESTADO.nuevo" "$ESTADO"
+    decir "== Desactivado a medias: falta encender Docker y servicios del sistema =="
+    avisar "Modo juego: falta un paso" "No se encendieron Docker ni los servicios del sistema. Aprieta Mod+Alt+G otra vez y pon la contraseña."
+    return 1
+  fi
+
+  rm -f "$ESTADO"
+  decir "== Modo juego desactivado =="
+  hay_escena || avisar "Modo juego desactivado" "Todo de vuelta."
+}
+
+# ────────────────────────────── Estado ───────────────────────────────
+
+estado() {
+  if esta_activo; then
+    echo "Modo juego ACTIVO desde $(anotado desde)."
+    echo "Anotado para devolver:"
+    awk -F'\t' '$1 ~ /^(usuario|sistema|contenedor|programa|perfil|teclado|pantalla|nomolestar)$/ {printf "  %-11s %s\n", $1, $2}' "$ESTADO"
+  elif [[ -f $ESTADO ]]; then
+    echo "Modo juego inactivo (queda una anotación de antes de reiniciar; se descarta sola)."
+  else
+    echo "Modo juego inactivo."
+  fi
+}
+
+# ───────────────────────────── Principal ─────────────────────────────
+
+accion=${1:-alternar}
+
+# Una anotación de antes de reiniciar ya no vale: al arrancar, los
+# servicios vuelven solos.
+if [[ -f $ESTADO ]] && ! esta_activo && [[ $accion != estado ]]; then
+  printf '%s  Anotación de un arranque anterior descartada.\n' "$(date '+%F %T')" >>"$REGISTRO"
+  rm -f "$ESTADO"
+fi
+
+if [[ $accion = alternar ]]; then
+  if esta_activo; then accion=desactivar; else accion=activar; fi
+fi
+
+case $accion in
+  activar | desactivar)
+    # Se relanza suelto, fuera del programa desde donde se llamó: si no,
+    # al cerrar ese programa se cortaría a medio camino.
+    if [[ -z ${MODO_JUEGO_SUELTO:-} ]]; then
+      suelto=(systemd-run --user --quiet --collect --unit="modo-juego-$(date +%s%N)"
+        --setenv=MODO_JUEGO_SUELTO=1)
+      for v in NIRI_SOCKET WAYLAND_DISPLAY DISPLAY DBUS_SESSION_BUS_ADDRESS PATH MODO_JUEGO_CONFIG MODO_JUEGO_ESTADO; do
+        [[ -n ${!v:-} ]] && suelto+=(--setenv="$v=${!v}")
+      done
+      if "${suelto[@]}" "$(realpath "$0")" "$accion"; then
+        echo "Modo juego: $accion en marcha (detalle en $REGISTRO)."
+        exit 0
+      fi
+    fi
+    exec 9>"$DIR/candado"
+    if ! flock -n 9; then
+      avisar "Modo juego" "Ya está trabajando, espera un momento."
+      exit 1
+    fi
+    if [[ $accion = activar ]] && esta_activo; then
+      decir "El modo juego ya está activo."
+      avisar "Modo juego" "Ya estaba activo."
+      exit 0
+    fi
+    "$accion"
+    ;;
+  simular)
+    SIMULAR=1
+    activar
+    ;;
+  estado) estado ;;
+  lanzador)
+    if escena_abierta; then
+      cerrar_escena
+    elif [[ -f $ESCENA/shell.qml ]]; then
+      abrir_escena lanzador
+    else
+      echo "No encuentro la escena en $ESCENA" >&2
+      exit 1
+    fi
+    ;;
+  animacion) abrir_escena intro ;;
+  caratulas)
+    modo-juego-catalogo
+    shift
+    modo-juego-caratulas --ver --por-nombre "$@"
+    ;;
+  agregar)
+    shift
+    agregar_juego "$@"
+    ;;
+  clave-steamgriddb)
+    archivo_clave="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/steamgriddb.clave"
+    if [[ ! -t 0 ]]; then
+      echo "Esto hay que ejecutarlo en una terminal, porque te pide la clave." >&2
+      exit 1
+    fi
+    echo "La clave es gratis: entra a https://www.steamgriddb.com/profile/preferences/api"
+    echo "con tu cuenta de Steam y aprieta «Generate API key»."
+    read -rsp "Pega aquí la clave y aprieta Enter (no se verá en pantalla): " clave_sgdb
+    echo
+    if guardar_clave "$clave_sgdb"; then
+      modo-juego-catalogo
+      modo-juego-caratulas --ver --por-nombre
+    else
+      echo "Revisa que la copiaste completa y vuelve a ejecutar: modo-juego clave-steamgriddb"
+    fi
+    ;;
+  guardar-clave)
+    # La usa el lanzador: la clave llega por la entrada estándar, nunca
+    # como argumento (así no queda a la vista en la lista de procesos).
+    IFS= read -r clave_sgdb || true
+    guardar_clave "$clave_sgdb"
+    ;;
+  quitar-clave)
+    rm -f -- "${ARCHIVO_CLAVE:?}"
+    echo "Clave quitada."
+    ;;
+  ajuste)
+    shift
+    poner_ajuste "$@"
+    ;;
+  ajustes) mostrar_ajustes ;;
+  jugar)
+    shift
+    jugar "$@"
+    ;;
+  teclado-impacto) teclado_impacto ;;
+  companero)
+    case ${2:-} in
+      siguiente | anterior | bajar | subir | preguntar)
+        pgrep -fx "qs -p $COMPANERO_DIR" >/dev/null && qs -p "$COMPANERO_DIR" ipc call companero "$2" >/dev/null
+        ;;
+      cerrar) companero_cerrar ;;
+      *) echo "Uso: modo-juego companero siguiente|anterior|bajar|subir|preguntar|cerrar" >&2; exit 2 ;;
+    esac
+    ;;
+  preguntar)
+    shift
+    preguntar "$@"
+    ;;
+  guardar-clave-ia)
+    # Igual que la de carátulas: llega por la entrada estándar.
+    IFS= read -r clave_ia || true
+    guardar_clave_ia "$clave_ia"
+    ;;
+  quitar-clave-ia)
+    rm -f -- "${ARCHIVO_CLAVE_IA:?}"
+    echo "Clave quitada."
+    ;;
+  salida)
+    # Muestra la secuencia de salida con un resumen de ejemplo.
+    jq -cn '{minutos: 95, vuelven: ["Chrome", "Spotify", "Docker"], partidas: [{nombre: "ELDEN RING", minutos: 82}]}' >"$RESUMEN"
+    abrir_escena salida
+    ;;
+  *)
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

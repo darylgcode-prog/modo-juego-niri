@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Traduce el mando a acciones del lanzador del modo juego.
+
+Escucha solo los mandos (dispositivos que tienen el botón de abajo, A o
+equis); no lee teclados ni ratones. Por cada pulsación escribe una línea:
+
+  izq  der  arr  aba     cruceta o palanca izquierda (se repite si se mantiene)
+  ok                     botón de abajo (A en Xbox, equis en PlayStation)
+  atras                  botón de la derecha (B, círculo)
+  menu                   Start / Options
+
+Lo lanza el propio lanzador y se cierra con él. Se pueden conectar y
+desconectar mandos mientras corre.
+"""
+import os
+import select
+import sys
+import time
+
+import evdev
+from evdev import ecodes as e
+
+BOTONES = {
+    e.BTN_SOUTH: "ok", e.BTN_EAST: "atras", e.BTN_START: "menu",
+    e.BTN_DPAD_LEFT: "izq", e.BTN_DPAD_RIGHT: "der", e.BTN_DPAD_UP: "arr", e.BTN_DPAD_DOWN: "aba",
+}
+UMBRAL = 0.6            # cuánto hay que inclinar la palanca
+PRIMERA_REPETICION = 0.38
+REPETICION = 0.15
+
+
+def decir(accion):
+    print(accion, flush=True)
+
+
+def buscar_mandos(abiertos):
+    """Abre los mandos nuevos y devuelve el diccionario actualizado."""
+    for ruta in evdev.list_devices():
+        if ruta in abiertos:
+            continue
+        try:
+            dispositivo = evdev.InputDevice(ruta)
+            capacidades = dispositivo.capabilities()
+            if e.BTN_SOUTH in capacidades.get(e.EV_KEY, []):
+                # Centro y recorrido de cada eje, para saber cuánto está inclinado.
+                ejes = {codigo: info for codigo, info in capacidades.get(e.EV_ABS, [])}
+                abiertos[ruta] = (dispositivo, ejes)
+            else:
+                dispositivo.close()
+        except OSError:
+            continue
+    return abiertos
+
+
+def inclinacion(valor, info):
+    """-1, 0 o 1 según hacia dónde esté el eje."""
+    medio = (info.max + info.min) / 2
+    recorrido = (info.max - info.min) / 2 or 1
+    v = (valor - medio) / recorrido
+    return 1 if v > UMBRAL else -1 if v < -UMBRAL else 0
+
+
+def main():
+    abiertos = {}
+    padre = os.getppid()             # quien lo lanzó; si cambia, quedó huérfano
+    direccion = {"x": 0, "y": 0}     # hacia dónde se mantiene apretado
+    proxima = {"x": 0.0, "y": 0.0}   # cuándo toca repetir
+    ultimo_barrido = 0.0
+    nombres = {("x", -1): "izq", ("x", 1): "der", ("y", -1): "arr", ("y", 1): "aba"}
+
+    def poner(eje, sentido):
+        if direccion[eje] != sentido:
+            direccion[eje] = sentido
+            if sentido:
+                decir(nombres[(eje, sentido)])
+                proxima[eje] = time.monotonic() + PRIMERA_REPETICION
+
+    while True:
+        ahora = time.monotonic()
+        if ahora - ultimo_barrido > 2:
+            ultimo_barrido = ahora
+            if os.getppid() != padre:  # el lanzador se cerró
+                return
+            buscar_mandos(abiertos)
+        descriptores = {d.fd: (ruta, d, ejes) for ruta, (d, ejes) in abiertos.items()}
+        try:
+            listos, _, _ = select.select(list(descriptores), [], [], 0.05)
+        except (OSError, ValueError):
+            listos = []
+        for fd in listos:
+            ruta, dispositivo, ejes = descriptores[fd]
+            try:
+                for ev in dispositivo.read():
+                    if ev.type == e.EV_KEY and ev.value == 1 and ev.code in BOTONES:
+                        decir(BOTONES[ev.code])
+                    elif ev.type == e.EV_ABS:
+                        if ev.code == e.ABS_HAT0X:
+                            poner("x", ev.value)
+                        elif ev.code == e.ABS_HAT0Y:
+                            poner("y", ev.value)
+                        elif ev.code == e.ABS_X and ev.code in ejes:
+                            poner("x", inclinacion(ev.value, ejes[ev.code]))
+                        elif ev.code == e.ABS_Y and ev.code in ejes:
+                            poner("y", inclinacion(ev.value, ejes[ev.code]))
+            except OSError:
+                # Se desconectó.
+                abiertos.pop(ruta, None)
+                direccion.update(x=0, y=0)
+        ahora = time.monotonic()
+        for eje in ("x", "y"):
+            if direccion[eje] and ahora >= proxima[eje]:
+                decir(nombres[(eje, direccion[eje])])
+                proxima[eje] = ahora + REPETICION
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (BrokenPipeError, KeyboardInterrupt):
+        sys.exit(0)

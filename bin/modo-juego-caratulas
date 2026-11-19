@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Busca el arte que le falta al lanzador del modo juego.
+
+Tres clases de imagen:
+  carátula   la tarjeta (juegos, lanzadores y emuladores)
+  fondo      el arte grande que llena la pantalla al elegir un juego
+  logo       el título del juego, que va sobre ese fondo
+
+Primero Steam (no pide nada) y, para lo que Steam no tiene, SteamGridDB
+(pide una clave gratuita; se guarda desde Ajustes en el lanzador).
+
+Para cada entrada a la que le falta algo:
+  1. Juegos: saca su número de Steam del script que lo lanza (SteamAppId,
+     GAMEID umu-N) o de la ruta de su icono, y baja el arte oficial.
+  2. Si Steam no lo tiene y hay clave, lo pide a SteamGridDB por ese número.
+  3. Sin número, solo con --por-nombre: busca por nombre en Steam y en
+     SteamGridDB, y acepta únicamente una coincidencia exacta. Aun así
+     puede tocar otro juego que se llame igual, por eso la búsqueda
+     automática no lo hace: va cuando la pides tú y ves el resultado.
+     Lanzadores y emuladores solo se buscan así.
+  4. Lo bajado se comprueba (que sea imagen, tamaño y forma) y se regraba.
+
+Carpetas en ~/.config/modo-juego/ (puedes poner imágenes tuyas a mano):
+  caratulas/<id>.jpg   fondos/<id>.jpg   logos/<id>.png
+  caratulas/<id>.no        vacío: a esa entrada no se le busca nada
+  caratulas/nombres.conf   «id = nombre con que buscarlo», una por línea
+
+Lo que no aparece queda anotado y no se reintenta hasta una semana después.
+
+  modo-juego-caratulas                busca lo que falte (solo por número)
+  modo-juego-caratulas --ver          además cuenta qué hizo con cada una
+  modo-juego-caratulas --por-nombre   busca también por nombre
+  modo-juego-caratulas --todo         reintenta lo que no encontró antes
+  modo-juego-caratulas --probar-clave comprueba la clave de SteamGridDB
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+
+CASA = os.path.expanduser("~")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", f"{CASA}/.cache"), "modo-juego")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", f"{CASA}/.config"), "modo-juego")
+CARATULAS = os.path.join(CONFIG, "caratulas")
+CATALOGO = os.path.join(CACHE, "catalogo.json")
+FALLIDAS = os.path.join(CACHE, "caratulas-no-encontradas.json")
+BAJADAS = os.path.join(CACHE, "bajadas")
+ARCHIVO_CLAVE = os.path.join(CONFIG, "steamgriddb.clave")
+CDN = "https://shared.akamai.steamstatic.com/store_item_assets/"
+SGDB = "https://www.steamgriddb.com/api/v2"
+REINTENTO = 7 * 24 * 3600
+VER = "--ver" in sys.argv
+
+# Por clase de imagen: dónde se guarda, cómo se llama en Steam (archivo
+# directo y nombre en la lista de la tienda) y en qué parte de SteamGridDB.
+CLASES = {
+    "caratula": {"carpeta": CARATULAS, "ext": "jpg", "campo": "caratula", "sgdb": "grids",
+                 "steam": ["library_600x900_2x.jpg", "library_600x900.jpg"],
+                 "tienda": ["library_capsule_2x", "library_capsule"]},
+    "fondo": {"carpeta": os.path.join(CONFIG, "fondos"), "ext": "jpg", "campo": "fondo", "sgdb": "heroes",
+              "steam": ["library_hero_2x.jpg", "library_hero.jpg"],
+              "tienda": ["library_hero_2x", "library_hero"]},
+    "logo": {"carpeta": os.path.join(CONFIG, "logos"), "ext": "png", "campo": "logo", "sgdb": "logos",
+             "steam": ["logo_2x.png", "logo.png"],
+             "tienda": ["logo_2x", "logo"]},
+}
+# Qué clases lleva cada fila del lanzador, y la forma de su carátula.
+FILAS = {
+    "juegos": (["caratula", "fondo", "logo"], "vertical"),
+    "lanzadores": (["caratula"], "cuadrada"),
+    "emuladores": (["caratula"], "cuadrada"),
+}
+# Tamaños a pedirle a SteamGridDB según la forma, de más a menos conveniente.
+TAMANOS = {
+    "vertical": ["600x900,660x930,342x482"],
+    "cuadrada": ["1024x1024,512x512", "920x430,460x215"],
+    "ancha": ["3840x1240,1920x620"],
+    "logo": [None],
+}
+
+clave_rechazada = False
+tienda_vista = {}
+
+
+def pedir(url, limite=8_000_000, cabeceras=None):
+    """GET sencillo. Devuelve (bytes, tipo de contenido, código HTTP)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", **(cabeceras or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            datos = r.read(limite + 1)
+            if len(datos) > limite:
+                return None, "", r.status
+            return datos, r.headers.get("Content-Type", ""), r.status
+    except urllib.error.HTTPError as e:
+        return None, "", e.code
+    except Exception:
+        return None, "", 0
+
+
+def normal(nombre):
+    """Nombre sin tildes, símbolos ni mayúsculas, para comparar."""
+    s = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def leer_clave():
+    clave = os.environ.get("STEAMGRIDDB_API_KEY", "").strip()
+    if clave:
+        return clave
+    try:
+        with open(ARCHIVO_CLAVE, encoding="utf-8") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def leer_nombres():
+    """nombres.conf: «id = nombre con que buscarlo»."""
+    nombres = {}
+    try:
+        with open(os.path.join(CARATULAS, "nombres.conf"), encoding="utf-8") as f:
+            for linea in f:
+                linea = linea.split("#", 1)[0]
+                if "=" in linea:
+                    clave, valor = linea.split("=", 1)
+                    if clave.strip() and valor.strip():
+                        nombres[clave.strip()] = valor.strip()
+    except OSError:
+        pass
+    return nombres
+
+
+# ── Steam ────────────────────────────────────────────────────────────
+
+def appid_local(item):
+    """Número de Steam escrito en el script que lanza el juego o en su icono."""
+    patron = r"(?:SteamAppId|SteamGameId|STEAM_COMPAT_APP_ID)=(\d+)|GAMEID=umu-(\d+)|rungameid/(\d+)"
+    textos = [item.get("cmd", "")]
+    try:
+        for palabra in shlex.split(item.get("cmd", "")):
+            if palabra.startswith("/") and os.path.isfile(palabra) and os.path.getsize(palabra) < 65536:
+                with open(palabra, "rb") as f:
+                    crudo = f.read()
+                if b"\0" not in crudo:
+                    textos.append(crudo.decode("utf-8", "replace"))
+                break
+    except ValueError:
+        pass
+    for texto in textos:
+        m = re.search(patron, texto)
+        if m:
+            return next(g for g in m.groups() if g)
+    m = re.search(r"steam-(\d+)", item.get("icono", "")) or re.match(r"steam-(\d+)$", item.get("id", ""))
+    return m.group(1) if m else None
+
+
+def steam_por_nombre(nombre):
+    """Busca en la tienda; solo vale una coincidencia exacta del nombre."""
+    url = "https://store.steampowered.com/api/storesearch/?" + urllib.parse.urlencode(
+        {"term": nombre, "l": "english", "cc": "US"})
+    datos, _, _ = pedir(url, 2_000_000)
+    try:
+        items = json.loads(datos).get("items", [])
+    except (TypeError, ValueError):
+        return None
+    buscado = normal(nombre)
+    for it in items:
+        if it.get("type") == "app" and normal(it.get("name", "")) == buscado:
+            return str(it["id"])
+    return None
+
+
+def tienda(appid):
+    """Lista de imágenes del juego según la tienda (se pide una sola vez)."""
+    if appid not in tienda_vista:
+        consulta = json.dumps({"ids": [{"appid": int(appid)}],
+                               "context": {"language": "english", "country_code": "US"},
+                               "data_request": {"include_assets": True}})
+        datos, _, _ = pedir("https://api.steampowered.com/IStoreBrowseService/GetItems/v1?"
+                            + urllib.parse.urlencode({"input_json": consulta}), 2_000_000)
+        try:
+            tienda_vista[appid] = json.loads(datos)["response"]["store_items"][0]["assets"]
+        except Exception:
+            tienda_vista[appid] = {}
+    return tienda_vista[appid]
+
+
+def urls_steam(appid, clase):
+    """Dónde puede estar esa imagen, de más a menos probable."""
+    base = f"{CDN}steam/apps/{appid}/"
+    for archivo in CLASES[clase]["steam"]:
+        yield base + archivo
+    # Los juegos nuevos la guardan en una ruta con huella: está en la lista de la tienda.
+    assets = tienda(appid)
+    formato = assets.get("asset_url_format")
+    for nombre in CLASES[clase]["tienda"]:
+        if formato and assets.get(nombre):
+            yield CDN + formato.replace("${FILENAME}", assets[nombre])
+
+
+# ── SteamGridDB ──────────────────────────────────────────────────────
+
+def sgdb(ruta, clave, parametros=None):
+    """Llama a la API. Devuelve la lista «data», o [] si no hay o falla."""
+    global clave_rechazada
+    url = SGDB + ruta
+    if parametros:
+        url += "?" + urllib.parse.urlencode(parametros)
+    datos, _, codigo = pedir(url, 4_000_000, {"Authorization": f"Bearer {clave}"})
+    if codigo in (401, 403):
+        clave_rechazada = True
+        return []
+    try:
+        respuesta = json.loads(datos)
+        return respuesta.get("data", []) if respuesta.get("success") else []
+    except (TypeError, ValueError):
+        return []
+
+
+def sgdb_por_nombre(nombre, clave):
+    """Identificador de SteamGridDB si algún resultado se llama exactamente así."""
+    buscado = normal(nombre)
+    for juego in sgdb("/search/autocomplete/" + urllib.parse.quote(nombre, safe=""), clave):
+        if normal(juego.get("name", "")) == buscado:
+            return juego.get("id")
+    return None
+
+
+def urls_sgdb(seccion, tipo, ident, clave, forma):
+    """Imágenes de SteamGridDB para ese juego, las mejor votadas primero."""
+    for dimensiones in TAMANOS[forma]:
+        parametros = {"types": "static", "nsfw": "false", "humor": "false",
+                      "mimes": "image/png" if forma == "logo" else "image/png,image/jpeg"}
+        if dimensiones:
+            parametros["dimensions"] = dimensiones
+        imagenes = sgdb(f"/{seccion}/{tipo}/{ident}", clave, parametros)
+        imagenes.sort(key=lambda g: (g.get("score", 0), g.get("upvotes", 0)), reverse=True)
+        for imagen in imagenes[:3]:
+            if isinstance(imagen.get("url"), str) and imagen["url"].startswith("https://"):
+                yield imagen["url"]
+
+
+# ── Bajar e instalar ─────────────────────────────────────────────────
+
+def forma_bien(forma, ancho, alto):
+    if max(ancho, alto) > 5000:
+        return False
+    if forma == "vertical":
+        return alto > ancho and ancho >= 200
+    if forma == "cuadrada":
+        return ancho >= alto * 0.9 and alto >= 200
+    if forma == "ancha":
+        return ancho >= alto * 1.4 and ancho >= 1000
+    return ancho >= 150 and alto >= 40      # logo
+
+
+def instalar(urls, ident, clase, forma):
+    """Baja la primera imagen que sirva. Lo bajado no se copia tal cual:
+    se comprueba formato, tamaño y forma, y se vuelve a grabar."""
+    datos_clase = CLASES[clase]
+    os.makedirs(BAJADAS, exist_ok=True)
+    os.makedirs(datos_clase["carpeta"], exist_ok=True)
+    cruda = os.path.join(BAJADAS, f"{ident}.{clase}.descarga")
+    for url in urls:
+        datos, tipo, _ = pedir(url)
+        if not datos or not tipo.startswith("image/"):
+            continue
+        with open(cruda, "wb") as f:
+            f.write(datos)
+        try:
+            info = subprocess.run(["magick", "identify", "-format", "%m %w %h", f"{cruda}[0]"],
+                                  capture_output=True, text=True, timeout=20).stdout.split()
+            formato, ancho, alto = info[0], int(info[1]), int(info[2])
+            if formato not in ("JPEG", "PNG", "WEBP") or not forma_bien(forma, ancho, alto):
+                continue
+            destino = os.path.join(datos_clase["carpeta"], f"{ident}.{datos_clase['ext']}")
+            temporal = f"{destino}.tmp.{datos_clase['ext']}"
+            orden = ["magick", f"{cruda}[0]"]
+            if datos_clase["ext"] == "jpg":
+                orden += ["-background", "black", "-flatten"]      # sin transparencia
+            if clase == "fondo":
+                orden += ["-resize", "3840x3840>"]
+            if clase == "logo":
+                orden += ["-trim", "+repage"]                      # sin el borde vacío
+            orden += ["-strip", "-quality", "90", temporal]
+            subprocess.run(orden, check=True, timeout=40)
+            os.replace(temporal, destino)
+            return True
+        except Exception:
+            continue
+        finally:
+            if os.path.exists(cruda):
+                os.remove(cruda)
+    return False
+
+
+class Buscador:
+    """Lo que se sabe de una entrada para buscarle imágenes. El número de
+    Steam y el identificador de SteamGridDB se averiguan una sola vez."""
+
+    def __init__(self, item, fila, clave, nombres, por_nombre):
+        self.item, self.fila, self.clave, self.por_nombre = item, fila, clave, por_nombre
+        self.nombre = nombres.get(item["id"], item["nombre"])
+        self.appid = appid_local(item) if fila == "juegos" else None
+        self.origen = "por su número"
+        self._nombre_visto = False
+        self._sgdb = None
+
+    @property
+    def se_puede(self):
+        return bool(self.appid) or self.por_nombre
+
+    def numero(self):
+        if not self.appid and self.fila == "juegos" and self.por_nombre and not self._nombre_visto:
+            self._nombre_visto = True
+            self.appid, self.origen = steam_por_nombre(self.nombre), "por su nombre"
+        return self.appid
+
+    def en_sgdb(self):
+        if self._sgdb is None:
+            self._sgdb = sgdb_por_nombre(self.nombre, self.clave) or False
+        return self._sgdb
+
+    def buscar(self, clase):
+        """Texto de dónde salió la imagen, o '' si no apareció."""
+        forma = FILAS[self.fila][1] if clase == "caratula" else ("ancha" if clase == "fondo" else "logo")
+        ident = self.item["id"]
+        appid = self.numero()
+        if appid and self.fila == "juegos" and instalar(urls_steam(appid, clase), ident, clase, forma):
+            return f"Steam {appid}, {self.origen}"
+        if self.clave and not clave_rechazada:
+            seccion = CLASES[clase]["sgdb"]
+            if appid and instalar(urls_sgdb(seccion, "steam", appid, self.clave, forma), ident, clase, forma):
+                return f"SteamGridDB, por su número de Steam {appid}"
+            if self.por_nombre and self.en_sgdb() and instalar(
+                    urls_sgdb(seccion, "game", self.en_sgdb(), self.clave, forma), ident, clase, forma):
+                return f"SteamGridDB, por su nombre «{self.nombre}»"
+        return ""
+
+
+def main():
+    clave = leer_clave()
+    if "--probar-clave" in sys.argv:
+        if not clave:
+            print("No hay clave guardada.")
+            return 1
+        _, _, codigo = pedir(SGDB + "/search/autocomplete/portal", 4_000_000,
+                             {"Authorization": f"Bearer {clave}"})
+        if codigo == 200:
+            print("Clave aceptada por SteamGridDB.")
+            return 0
+        if codigo in (401, 403):
+            print("SteamGridDB rechazó la clave.")
+            return 1
+        print(f"No pude comprobar la clave: SteamGridDB no respondió bien (código {codigo}).")
+        return 2
+
+    try:
+        with open(CATALOGO, encoding="utf-8") as f:
+            catalogo = json.load(f)
+    except (OSError, ValueError):
+        print("No hay catálogo todavía: ejecuta modo-juego-catalogo.", file=sys.stderr)
+        return 1
+    try:
+        with open(FALLIDAS, encoding="utf-8") as f:
+            fallidas = json.load(f)
+    except (OSError, ValueError):
+        fallidas = {}
+
+    nombres = leer_nombres()
+    por_nombre = "--por-nombre" in sys.argv
+    ahora = time.time()
+    nuevas = {"caratula": 0, "fondo": 0, "logo": 0}
+    faltan = 0
+    for fila, (clases, _) in FILAS.items():
+        for item in catalogo.get(fila, []):
+            ident, nombre = item["id"], item["nombre"]
+            pendientes = [c for c in clases if not item.get(CLASES[c]["campo"])]
+            if not pendientes:
+                continue
+            if os.path.exists(os.path.join(CARATULAS, f"{ident}.no")):
+                VER and print(f"  {nombre}: marcado para no buscar")
+                continue
+            buscador = Buscador(item, fila, clave, nombres, por_nombre)
+            for clase in pendientes:
+                # La carátula conserva la llave de antes (solo el id).
+                llave = ident if clase == "caratula" else f"{ident}#{clase}"
+                previa = fallidas.get(llave)
+                if isinstance(previa, (int, float)):       # formato anterior: solo la fecha
+                    previa = {"t": previa, "clave": False, "nombre": True}
+                # Un intento anterior sigue valiendo si fue hace poco y no se
+                # hizo con menos medios que ahora (sin clave, o solo por número).
+                if (previa and "--todo" not in sys.argv and ahora - previa.get("t", 0) < REINTENTO
+                        and (previa.get("clave") or not clave)
+                        and (previa.get("nombre") or not por_nombre)):
+                    if clase == "caratula":
+                        faltan += 1
+                        VER and print(f"  {nombre}: no apareció la última vez (se reintenta en unos días)")
+                    continue
+                if not buscador.se_puede:
+                    if clase == "caratula":
+                        faltan += 1
+                        VER and print(f"  {nombre}: no se buscó (sin número de Steam; usa «Buscar carátulas ahora»)")
+                    continue
+                resultado = buscador.buscar(clase)
+                if resultado:
+                    nuevas[clase] += 1
+                    fallidas.pop(llave, None)
+                    VER and print(f"  {nombre}: {clase} bajado ({resultado})".replace("caratula bajado", "carátula bajada"))
+                else:
+                    fallidas[llave] = {"t": ahora, "clave": bool(clave) and not clave_rechazada, "nombre": por_nombre}
+                    if clase == "caratula":
+                        faltan += 1
+                        VER and print(f"  {nombre}: no encontré la carátula")
+
+    os.makedirs(CACHE, exist_ok=True)
+    with open(FALLIDAS + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(fallidas, f)
+    os.replace(FALLIDAS + ".tmp", FALLIDAS)
+    if any(nuevas.values()):
+        # El catálogo se rearma para que el lanzador las vea la próxima vez.
+        subprocess.run(["modo-juego-catalogo"], check=False)
+    if VER:
+        print(f"Nuevas: {nuevas['caratula']} carátulas, {nuevas['fondo']} fondos, {nuevas['logo']} logos. "
+              f"Siguen sin carátula: {faltan}.")
+        if clave_rechazada:
+            print("SteamGridDB rechazó la clave: guárdala de nuevo en Ajustes.")
+        elif faltan and not clave:
+            print("Para lo que Steam no tiene hace falta la clave de SteamGridDB (Ajustes, en el lanzador).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
