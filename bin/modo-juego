@@ -153,6 +153,24 @@ avisar() {
   notify-send -a "Modo juego" -i applications-games -t 8000 "$1" "${2:-}" 2>/dev/null || true
 }
 
+# Detiene o enciende servicios del sistema con una sola petición de
+# contraseña: «servicios_sistema stop|start unidad…».
+# Va por pkexec y no por «systemctl» a secas: con varias unidades en una
+# orden, systemctl (systemd 262) usa una llamada, EnqueueUnitJobMany, que
+# la política de D-Bus rechaza a quien no es root. Sale «Access denied» al
+# instante, sin llegar a pedir la contraseña. Con pkexec se pide una vez y
+# la orden corre ya con permiso; además no tiene el tope de 25 segundos
+# que D-Bus le da a systemctl para que escribas la clave.
+servicios_sistema() {
+  local verbo=$1
+  shift
+  if command -v pkexec >/dev/null; then
+    timeout 180 pkexec systemctl "$verbo" "$@"
+  else
+    timeout 180 systemctl "$verbo" "$@"
+  fi
+}
+
 # Ejecuta el comando, o solo lo muestra si se está simulando.
 hacer() {
   if [[ $SIMULAR = 1 ]]; then
@@ -853,7 +871,7 @@ activar() {
   if ((${#u_sistema[@]})); then
     decir "Servicios del sistema (pide contraseña):"
     for p in "${u_sistema[@]}"; do decir " · $p"; done
-    if hacer timeout 180 systemctl stop "${u_sistema[@]}"; then
+    if hacer servicios_sistema stop "${u_sistema[@]}"; then
       [[ $SIMULAR = 1 ]] || for p in "${u_sistema[@]}"; do printf 'sistema\t%s\n' "$p" >>"$ESTADO"; done
       CERRADOS=$((CERRADOS + ${#u_sistema[@]}))
     else
@@ -993,7 +1011,7 @@ desactivar() {
   if ((${#u_sistema[@]})); then
     decir "Servicios del sistema (pide contraseña):"
     for p in "${u_sistema[@]}"; do decir " · $p"; done
-    if ! timeout 180 systemctl start "${u_sistema[@]}"; then
+    if ! servicios_sistema start "${u_sistema[@]}"; then
       falla_sistema=1
       decir "   No se pudieron encender (sin contraseña o cancelado)."
     fi
