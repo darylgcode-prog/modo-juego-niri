@@ -25,12 +25,14 @@ for f in modo-juego modo-juego-catalogo modo-juego-caratulas modo-juego-mando mo
   rm -f "$BIN/$f"
 done
 rm -rf "${CONFIG:?}/quickshell/modo-juego" "${CONFIG:?}/quickshell/modo-juego-companero"
+rm -rf "${DATOS:?}/modo-juego/extensiones" "${DATOS:?}/modo-juego/iconos"
 echo "Quitados los programas y la interfaz."
 
 if [[ $TODO = si ]]; then
   rm -rf "${CONFIG:?}/modo-juego" "${DATOS:?}/modo-juego" "${ESTADO:?}/modo-juego" "${CACHE:?}/modo-juego"
   rm -f "$CONFIG/niri/modo-juego.kdl"
-  echo "Quitadas también tu configuración, notas, carátulas, claves y el entorno del asistente."
+  echo "Quitadas también tu configuración, notas, carátulas, claves, el entorno del asistente"
+  echo "y el perfil de Xbox Cloud (con su sesión iniciada)."
 else
   echo "Quedaron tu configuración y tus datos en $CONFIG/modo-juego (usa --todo para quitarlos)."
 fi

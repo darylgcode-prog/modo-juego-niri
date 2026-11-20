@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Icono propio del modo juego para la tarjeta de Xbox Cloud: una nube con cruceta y botones. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="nube" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#19d9ff"/>
+      <stop offset="1" stop-color="#7a5cff"/>
+    </linearGradient>
+  </defs>
+  <path d="M148 392c-62 0-108-45-108-103 0-52 37-94 87-102 16-63 72-107 139-107 70 0 129 49 142 116 39 12 64 47 64 90 0 60-46 106-106 106z"
+        fill="#0c0a18" fill-opacity="0.82" stroke="url(#nube)" stroke-width="22" stroke-linejoin="round"/>
+  <!-- cruceta -->
+  <path d="M172 246h30v30h30v30h-30v30h-30v-30h-30v-30h30z" fill="#ffffff"/>
+  <!-- botones -->
+  <circle cx="330" cy="262" r="19" fill="#ff2a9e"/>
+  <circle cx="372" cy="304" r="19" fill="#19d9ff"/>
+  <circle cx="288" cy="304" r="19" fill="#ffffff" fill-opacity="0.85"/>
+  <circle cx="330" cy="346" r="19" fill="#7ef0b2"/>
+</svg>

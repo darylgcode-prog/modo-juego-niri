@@ -6,6 +6,8 @@
 #   ./install.sh --sin-dependencias no instala paquetes: solo dice qué falta
 #   ./install.sh --asistente        además prepara el asistente con IA (crea un
 #                                   entorno de Python y baja el paquete de Anthropic)
+#   ./install.sh --xcloud           además instala Chromium, para elegir la región
+#                                   del servidor en Xbox Cloud (unos 450 MB)
 #   ./install.sh --actualizar       baja la última versión del repositorio y la instala
 #                                   (lo mismo que hace «modo-juego actualizar»)
 #
@@ -20,6 +22,7 @@ BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 DATOS="${XDG_DATA_HOME:-$HOME/.local/share}"
 CON_ASISTENTE=no
+CON_XCLOUD=no
 ACTUALIZAR=no
 DEPENDENCIAS=preguntar      # preguntar | si | no
 RESTO=()
@@ -29,9 +32,10 @@ for arg in "$@"; do
   case $arg in
     --actualizar) ACTUALIZAR=si ;;
     --asistente) CON_ASISTENTE=si ;;
+    --xcloud) CON_XCLOUD=si ;;
     --si) DEPENDENCIAS=si ;;
     --sin-dependencias) DEPENDENCIAS=no ;;
-    -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "No conozco la opción «$arg». Prueba con --help." >&2; exit 2 ;;
   esac
 done
@@ -95,6 +99,7 @@ fuente:Inter|recomendado|la letra con que está diseñado|inter-font|fonts-inter
 powerprofilesctl|aparte|perfil de rendimiento al jugar (choca con TLP)|power-profiles-daemon|power-profiles-daemon|power-profiles-daemon
 asusctl|aparte|que el teclado reaccione (solo portátiles ASUS)|-|-|-
 dms|aparte|«no molestar» (solo con DankMaterialShell)|-|-|-
+chromium|aparte|elegir la región en Xbox Cloud (se instala con --xcloud)|chromium|chromium|chromium
 '
 
 esta() {   # ¿está lo que pide esta comprobación?
@@ -206,6 +211,27 @@ if ((${#PAQ_RECOMENDADOS[@]})); then
   fi
 fi
 
+# Chromium va aparte de lo recomendado: pesa cientos de megas y solo sirve
+# para elegir la región en Xbox Cloud (Chrome ya no deja cargar la extensión
+# que lo hace). No entra en «--si»: se pide con --xcloud o se pregunta.
+if ! hay chromium && [[ -n $GESTOR ]]; then
+  quiere=no
+  if [[ $CON_XCLOUD = si ]]; then
+    quiere=si
+  elif [[ $DEPENDENCIAS = preguntar && -t 0 ]]; then
+    echo
+    echo "Xbox Cloud se abre con el navegador que tengas. Para además elegir la"
+    echo "región del servidor hace falta Chromium (unos 450 MB instalado):"
+    echo "    $(orden_instalar chromium)"
+    read -r -p "¿Lo instalo? [s/N] " respuesta || respuesta=''
+    [[ $respuesta =~ ^[sSyY] ]] && quiere=si
+  fi
+  if [[ $quiere = si ]]; then
+    # shellcheck disable=SC2046
+    $(orden_instalar chromium) || echo "La instalación de Chromium no terminó bien." >&2
+  fi
+fi
+
 # Después de instalar (o de no hacerlo), ¿quedó lo necesario?
 revisar callado
 if ((FALTA_NECESARIO)); then
@@ -232,6 +258,15 @@ for d in modo-juego modo-juego-companero; do
   # Se reemplaza entera para que no queden archivos de una versión anterior.
   rm -rf "${CONFIG:?}/quickshell/$d"
   cp -r "$AQUI/quickshell/$d" "$CONFIG/quickshell/$d"
+  echo "  $d"
+done
+
+# La extensión de región de Xbox Cloud y el icono de su tarjeta.
+echo "== Xbox Cloud → $DATOS/modo-juego =="
+mkdir -p "$DATOS/modo-juego"
+for d in extensiones iconos; do
+  rm -rf "${DATOS:?}/modo-juego/$d"
+  cp -r "$AQUI/$d" "$DATOS/modo-juego/$d"
   echo "  $d"
 done
 
@@ -300,6 +335,11 @@ esac
 if [[ -d $CONFIG/niri ]] && ! grep -qs 'modo-juego.kdl' "$CONFIG/niri/config.kdl"; then
   echo "  · Agrega esta línea a $CONFIG/niri/config.kdl para tener los atajos:"
   echo '        include "modo-juego.kdl"'
+fi
+if hay chromium; then
+  echo "  · Xbox Cloud: la región del servidor se elige con Mod+Alt+X (con Xbox Cloud abierto)."
+else
+  echo "  · Xbox Cloud abre sin selector de región. Para tenerlo:  ./install.sh --xcloud"
 fi
 echo "  · Para actualizar más adelante:                     modo-juego actualizar"
 echo "  · Mira qué cerraría en tu equipo, sin tocar nada:   modo-juego simular"

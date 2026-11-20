@@ -35,6 +35,11 @@ binds {
         spawn "modo-juego" "companero" "preguntar";
     }
 
+    // Xbox Cloud: con él abierto, elige la región del servidor.
+    Mod+Alt+X hotkey-overlay-title="Xbox Cloud: región del servidor" {
+        spawn "modo-juego" "xcloud" "region";
+    }
+
     // En portátiles ASUS, la tecla Armoury Crate suele llegar como
     // XF86Launch3 y no hace nada: sirve para el modo juego.
     // XF86Launch3 hotkey-overlay-title="Modo juego" { spawn "modo-juego"; }

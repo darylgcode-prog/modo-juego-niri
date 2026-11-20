@@ -35,6 +35,8 @@ los programas que cerró y muestra un resumen de la sesión.
   categoría Juegos, lo instalado en Steam y lo de Lutris.
 - **ROMs:** cada juego que dejes en una carpeta por consola aparece como un
   juego más y se abre directo con su emulador.
+- **Xbox Cloud:** una tarjeta abre Xbox Cloud Gaming a pantalla completa, y
+  con Chromium se puede elegir la región del servidor.
 - Baja carátulas, fondos y logos de Steam, y de SteamGridDB para lo que
   Steam no tiene (pide una clave gratuita).
 - Recuerda lo último que jugaste y cuántas horas llevas.
@@ -76,7 +78,8 @@ puede hacer falta ajustar cosas; los reportes son bienvenidos.
 | Opcional | Para qué |
 |---|---|
 | PipeWire (`pw-play`) | los sonidos |
-| un navegador tipo Chromium | las guías del compañero |
+| un navegador tipo Chromium | las guías del compañero y Xbox Cloud |
+| Chromium (ese en particular) | elegir la región del servidor en Xbox Cloud |
 | grim | la captura que acompaña las preguntas al asistente |
 | python-evdev | manejar el lanzador con mando |
 | power-profiles-daemon | perfil de rendimiento al jugar |
@@ -165,6 +168,7 @@ sirva. La versión instalada se ve con `modo-juego version` y en Ajustes.
 | `Mod+Alt+← →` | Compañero: cambia de guía |
 | `Mod+Alt+↑ ↓` | Compañero: desplaza la guía |
 | `Mod+Alt+P` | Compañero: pregunta al asistente |
+| `Mod+Alt+X` | Xbox Cloud: elige la región del servidor |
 
 En el lanzador: flechas para moverse, `Enter` para lanzar, `Esc` para
 cerrar, `F2` para los ajustes y `F10` para salir del modo juego.
@@ -184,6 +188,24 @@ Lo demás va en archivos de `~/.config/modo-juego/`:
 | `MangoHud.conf` | el contador de FPS |
 | `caratulas/`, `fondos/`, `logos/` | arte de cada juego; puedes poner el tuyo |
 | `notas/` | tus notas por juego |
+
+### Xbox Cloud
+
+Si hay un navegador tipo Chromium, la fila de lanzadores trae una tarjeta de
+**Xbox Cloud**: abre [Xbox Cloud Gaming](https://www.xbox.com/play) a pantalla
+completa, en un perfil de navegador propio (inicias sesión una vez con tu
+cuenta de Microsoft y queda guardada ahí, aparte de tu navegador de siempre).
+Al cerrar la ventana vuelve el lanzador. Se quita con `XBOX_CLOUD=no` en
+`config.sh`.
+
+Con **Chromium** instalado (`./install.sh --xcloud`) va además un selector de
+región: con Xbox Cloud abierto, `Mod+Alt+X` muestra las regiones que Xbox le
+ofrece a tu cuenta y deja pedir una. Lo hace una extensión que viene en
+`extensiones/xcloud-region`, una copia adaptada de
+[xCloud Region Switcher](https://github.com/BlaNkS01/xcloud-region-switcher)
+de BlaNkS01 (MIT); ahí mismo dice qué se le cambió. Con Chrome, Brave u otro,
+Xbox Cloud abre igual pero sin selector: Chrome ya no acepta cargar
+extensiones desde la línea de comandos.
 
 ### ROMs
 
@@ -229,6 +251,12 @@ modo-juego agregar "Nombre del juego" /ruta/al/ejecutable
 - **El asistente** envía a Anthropic tu pregunta y, si está activado, una
   captura de la pantalla del juego tomada en ese momento. La captura se borra
   del equipo al recibir la respuesta. Cada pregunta se cobra en tu cuenta.
+- **La región de Xbox Cloud** es una petición: Xbox puede asignar otro
+  servidor. El autor de la extensión la probó solo en el sitio clásico
+  (`www.xbox.com/play`) y no en el nuevo `play.xbox.com`. La opción «saltar
+  la restricción regional» viene apagada: puede no funcionar, va contra las
+  reglas regionales de Xbox y el riesgo es de la cuenta de quien la active.
+  Este proyecto no tiene relación con Microsoft ni con Xbox.
 - **Las claves** (Anthropic y SteamGridDB) se guardan en archivos que solo tu
   usuario puede leer, en `~/.config/modo-juego/`.
 - **Sin mando para Ajustes ni para escribir:** el mando sirve para moverse y
@@ -244,6 +272,7 @@ modo-juego agregar "Nombre del juego" /ruta/al/ejecutable
 ## Licencia
 
 MIT. Los sonidos y los sombreados se generaron para este proyecto y van bajo
-la misma licencia.
+la misma licencia. La extensión de `extensiones/xcloud-region` es de BlaNkS01,
+también MIT, con su propio archivo de licencia.
 
 Construido conversando con [Claude Code](https://claude.com/claude-code).

@@ -6,6 +6,10 @@ juegos instalados en Steam y los de Lutris, y los reparte en tres filas:
 juegos, lanzadores y emuladores. Escribe un JSON (por defecto en
 ~/.cache/modo-juego/catalogo.json).
 
+Si hay un navegador tipo Chromium, la fila de lanzadores trae además una
+tarjeta de Xbox Cloud Gaming, que se abre con «modo-juego xcloud» (se
+quita con XBOX_CLOUD=no en config.sh).
+
 También suma las ROMs: cada archivo de juego que encuentre en las carpetas
 de ~/.config/modo-juego/roms.conf (una subcarpeta por consola) aparece en
 la fila de juegos y se abre directo con su emulador.
@@ -19,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -30,6 +35,9 @@ FONDOS = os.path.join(CONFIG, "fondos")
 LOGOS = os.path.join(CONFIG, "logos")
 PARTIDAS = os.path.join(os.environ.get("XDG_STATE_HOME", f"{CASA}/.local/state"), "modo-juego", "partidas.jsonl")
 STEAM = f"{CASA}/.local/share/Steam"
+DATOS = os.path.join(os.environ.get("XDG_DATA_HOME", f"{CASA}/.local/share"), "modo-juego")
+# Navegadores con los que «modo-juego xcloud» sabe abrir Xbox Cloud.
+NAVEGADORES = ["chromium", "google-chrome-stable", "brave", "vivaldi-stable", "microsoft-edge-stable"]
 
 # De menor a mayor prioridad: una entrada del usuario tapa a la del sistema.
 DIRS_APPS = [
@@ -400,6 +408,27 @@ def juegos_steam():
             }
 
 
+def xbox_cloud():
+    """Xbox Cloud Gaming no es un programa instalado sino una página: la
+    tarjeta existe si hay con qué abrirla y no se pidió quitarla."""
+    if os.environ.get("MODO_JUEGO_XCLOUD", "si") == "no":
+        return
+    if not any(shutil.which(n) for n in NAVEGADORES):
+        return
+    icono = os.path.join(DATOS, "iconos", "xcloud.svg")
+    yield "lanzadores", {
+        "id": "xcloud",
+        "nombre": "Xbox Cloud",
+        "detalle": "Game Pass por streaming · Mod+Alt+X elige la región",
+        "icono": icono if os.path.exists(icono) else "",
+        "caratula": caratula_de("xcloud"),
+        "fondo": imagen_de(FONDOS, "xcloud"),
+        "logo": imagen_de(LOGOS, "xcloud"),
+        "steam": "",
+        "cmd": "modo-juego xcloud",
+    }
+
+
 def juegos_lutris():
     try:
         salida = subprocess.run(["lutris", "-l", "-j"], capture_output=True, text=True, timeout=25).stdout
@@ -426,7 +455,7 @@ def main():
     destino = os.path.abspath(rutas[0]) if rutas else os.path.join(CACHE, "catalogo.json")
     catalogo = {"juegos": [], "lanzadores": [], "emuladores": []}
     ids, nombres = set(), set()
-    fuentes = [entradas_desktop(), juegos_steam()]
+    fuentes = [entradas_desktop(), juegos_steam(), xbox_cloud()]
     if "--sin-lutris" not in sys.argv:
         fuentes.append(juegos_lutris())
     for fuente in fuentes:

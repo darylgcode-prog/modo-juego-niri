@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Región de Xbox Cloud</title>
+<style>
+*{box-sizing:border-box}
+html{background:#070610}
+body{margin:0 auto;min-width:330px;max-width:460px;background:#070610;color:#f3f4fb;font:15px "Inter Display",Inter,system-ui,sans-serif;padding:22px}
+h1{font-size:20px;margin:0 0 4px;font-weight:800;font-style:italic;letter-spacing:.5px}
+p{color:#a9aec6;line-height:1.45;margin:5px 0 18px}
+label{font-weight:600}
+select{width:100%;background:#12101c;border:1px solid #3a3d55;border-radius:10px;color:#fff;padding:11px;margin-top:7px;font:inherit}
+select:focus,button:focus,input:focus{outline:2px solid #19d9ff;outline-offset:2px}
+button{background:#19d9ff;border:0;color:#070610;font:inherit;font-weight:800;padding:12px;width:100%;border-radius:10px;cursor:pointer;margin-top:14px}
+small{color:#a9aec6;display:block;margin-top:10px;line-height:1.4}
+.fila{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin:18px 0 0}
+.fila input{width:20px;height:20px;margin-top:2px;accent-color:#ff2a9e;flex:none}
+.aviso{color:#ffb86b}
+.estado{color:#7ef0b2;margin-top:12px;min-height:20px}
+.dato{background:#12101c;border:1px solid #23253a;border-radius:10px;padding:12px;margin-top:14px}
+.dato strong{display:block;margin-top:5px;font-size:17px}
+</style>
+</head>
+<body>
+<h1>REGIÓN DE XBOX CLOUD</h1>
+<p>Qué servidor se le pide a Xbox. No cambia tu dirección IP ni es una VPN.</p>
+
+<label for="region">Región del servidor</label>
+<select id="region">
+  <option value="auto">Automática: elige Xbox</option>
+  <option value="latency">Automática: la que responde más rápido (experimental)</option>
+</select>
+<small id="hint">Todavía no hay lista: abre Xbox Cloud e inicia sesión, y vuelve aquí.</small>
+
+<div class="dato"><small>Última región pedida</small><strong id="current">Aún no se sabe</strong><small id="reason">Pedir una región no asegura que Xbox la use.</small></div>
+<div class="dato"><small>Región real (solo si Xbox la informa)</small><strong id="actual">Sin confirmar</strong><small id="actualreason">Puede ser distinta de la que pediste.</small></div>
+
+<div class="fila">
+  <div>
+    <label for="bypass">Saltar la restricción regional (experimental)</label>
+    <small class="aviso">Hace que el inicio de sesión aparente venir de otro lugar. Puede no funcionar, va contra las reglas regionales de Xbox y el riesgo es de tu cuenta. Déjalo apagado si Xbox Cloud ya te funciona.</small>
+  </div>
+  <input type="checkbox" id="bypass">
+</div>
+
+<button id="apply">Guardar y recargar Xbox Cloud</button>
+<div class="estado" id="status"></div>
+
+<small>«La que responde más rápido» compara el tiempo de respuesta web de los servidores que entrega Xbox al iniciar sesión; no es el retardo del juego. Si no se puede medir, elige Xbox.</small>
+<small>Copia adaptada de xCloud Region Switcher, de BlaNkS01 (licencia MIT). Proyecto independiente, sin relación con Microsoft ni Xbox.</small>
+<script src="popup.js"></script>
+</body>
+</html>

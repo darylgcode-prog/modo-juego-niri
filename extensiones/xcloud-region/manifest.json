@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Región de Xbox Cloud (modo juego)",
+  "version": "1.5.1",
+  "description": "Elige la región del servidor de Xbox Cloud Gaming. Copia adaptada de xCloud Region Switcher, de BlaNkS01 (MIT).",
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.xbox.com/*", "https://xbox.com/*", "https://play.xbox.com/*"],
+  "action": {"default_popup": "popup.html", "default_title": "Región de Xbox Cloud"},
+  "content_scripts": [
+    {"matches": ["https://www.xbox.com/*", "https://xbox.com/*", "https://play.xbox.com/*"], "js": ["main.js"], "run_at": "document_start", "world": "MAIN"},
+    {"matches": ["https://www.xbox.com/*", "https://xbox.com/*", "https://play.xbox.com/*"], "js": ["bridge.js"], "run_at": "document_start"}
+  ]
+}

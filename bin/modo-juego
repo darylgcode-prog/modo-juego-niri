@@ -11,6 +11,8 @@
 #   modo-juego salida       muestra la secuencia de salida, con datos de ejemplo
 #   modo-juego companero alternar|siguiente|anterior|bajar|subir|preguntar
 #                           maneja el compañero de juego (lo usan los atajos)
+#   modo-juego xcloud       abre Xbox Cloud Gaming a pantalla completa
+#   modo-juego xcloud region   elige la región del servidor (Mod+Alt+X)
 #   modo-juego actualizar   baja la última versión y la instala
 #   modo-juego version      dice qué versión está instalada
 #   modo-juego caratulas    busca las carátulas que falten (Steam y SteamGridDB)
@@ -105,6 +107,9 @@ ASISTENTE_CAPTURA=si
 # "si": al cerrar un juego o un emulador abierto desde el lanzador, el
 # lanzador vuelve a aparecer.
 VOLVER_AL_LANZADOR=si
+# "si": el lanzador trae una tarjeta de Xbox Cloud Gaming (se abre en el
+# navegador, con perfil propio). Con Chromium se puede elegir la región.
+XBOX_CLOUD=si
 
 # ──────────────────────────── Preparación ────────────────────────────
 
@@ -132,6 +137,11 @@ ARCHIVO_GUIAS="${XDG_CONFIG_HOME:-$HOME/.config}/modo-juego/guias.conf"
 COMPANERO_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/modo-juego-companero"
 NAVEGADOR_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/navegador"
 PUERTO_GUIAS=9333
+XCLOUD_PERFIL="${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/xcloud-perfil"
+XCLOUD_EXTENSION="${XDG_DATA_HOME:-$HOME/.local/share}/modo-juego/extensiones/xcloud-region"
+XCLOUD_URL="https://www.xbox.com/play"
+# El catálogo lo mira para saber si pone la tarjeta de Xbox Cloud.
+export MODO_JUEGO_XCLOUD="$XBOX_CLOUD"
 
 decir() {
   printf '%s\n' "$*"
@@ -322,6 +332,111 @@ navegador_guias() {
   return 1
 }
 
+# ───────────────────────── Xbox Cloud Gaming ─────────────────────────
+
+# El navegador para Xbox Cloud. Chromium va primero: es el que todavía
+# acepta cargar una extensión desde la línea de comandos (Chrome dejó de
+# hacerlo), y sin eso no hay selector de región.
+navegador_xcloud() {
+  local n
+  for n in chromium google-chrome-stable brave vivaldi-stable microsoft-edge-stable; do
+    command -v "$n" >/dev/null && echo "$n" && return 0
+  done
+  return 1
+}
+
+# ¿Con este navegador va la extensión de región?
+xcloud_con_region() { [[ $1 = chromium && -f $XCLOUD_EXTENSION/manifest.json ]]; }
+
+# El proceso del navegador de Xbox Cloud, si está abierto. El navegador
+# deja en su perfil un enlace «SingletonLock» que apunta a «equipo-pid».
+xcloud_pid() {
+  local destino pid
+  destino=$(readlink "$XCLOUD_PERFIL/SingletonLock" 2>/dev/null) || return 1
+  pid=${destino##*-}
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
+  # (El navegador reescribe su línea de órdenes como un solo texto: se
+  # busca el perfil dentro, no como argumento suelto.)
+  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF -- "--user-data-dir=$XCLOUD_PERFIL" || return 1
+  echo "$pid"
+}
+
+# La ventana de Xbox Cloud en niri (la primera de ese navegador), o vacío.
+xcloud_ventana() {
+  local pid
+  pid=$(xcloud_pid) || return 1
+  niri msg -j windows 2>/dev/null | jq -r --argjson p "$pid" '[.[] | select(.pid == $p)][0].id // empty'
+}
+
+# Deja la ventana a pantalla completa si el navegador no lo hizo solo.
+# niri no dice si una ventana lo está (y su acción alterna), así que se
+# compara el tamaño de la ventana con el de la pantalla.
+xcloud_pantalla_completa() {
+  local i id='' ventana pantalla
+  for ((i = 0; i < 30; i++)); do
+    sleep 0.5
+    id=$(xcloud_ventana) && [[ -n $id ]] && break
+  done
+  [[ -n $id ]] || return 0
+  sleep 2
+  ventana=$(niri msg -j windows 2>/dev/null | jq -c --argjson i "$id" '.[] | select(.id == $i) | .layout.window_size')
+  pantalla=$(niri msg -j focused-output 2>/dev/null | jq -c '[.logical.width, .logical.height]')
+  [[ -n $ventana && -n $pantalla && $ventana != "$pantalla" ]] || return 0
+  niri msg action fullscreen-window --id "$id" >/dev/null 2>&1
+}
+
+# Abre Xbox Cloud y espera a que se cierre el navegador (así el lanzador
+# anota la partida y vuelve). La sesión de Microsoft queda guardada en un
+# perfil propio, separado de tu navegador de todos los días.
+xcloud_abrir() {
+  local nav pid id
+  local -a args
+  if ! nav=$(navegador_xcloud); then
+    avisar "Xbox Cloud" "Hace falta Chromium (u otro navegador de esa familia)."
+    echo "No hay un navegador tipo Chromium para abrir Xbox Cloud." >&2
+    return 1
+  fi
+  if pid=$(xcloud_pid); then
+    # Ya estaba abierto: se le da el foco en vez de abrir otra ventana.
+    id=$(xcloud_ventana) && [[ -n $id ]] && niri msg action focus-window --id "$id" >/dev/null 2>&1
+    tail --pid="$pid" -f /dev/null
+    return 0
+  fi
+  mkdir -p "$XCLOUD_PERFIL"
+  args=("--user-data-dir=$XCLOUD_PERFIL" --no-first-run --no-default-browser-check --start-fullscreen "--app=$XCLOUD_URL")
+  if xcloud_con_region "$nav"; then
+    args+=("--load-extension=$XCLOUD_EXTENSION")
+  else
+    decir "Xbox Cloud se abre con $nav, sin selector de región (eso necesita Chromium)."
+  fi
+  "$nav" "${args[@]}" >/dev/null 2>&1 &
+  pid=$!
+  xcloud_pantalla_completa &
+  wait "$pid"
+}
+
+# Abre los ajustes de la extensión de región en una ventana aparte, al lado
+# de Xbox Cloud. Tiene que estar abierto: la lista de regiones la entrega
+# Xbox al iniciar sesión, y la extensión solo existe en ese navegador.
+xcloud_region() {
+  local nav id
+  nav=$(navegador_xcloud) || nav=''
+  if ! xcloud_con_region "$nav"; then
+    avisar "Xbox Cloud" "Elegir la región necesita Chromium. Instálalo y vuelve a abrir Xbox Cloud."
+    echo "Elegir la región necesita Chromium y la extensión en $XCLOUD_EXTENSION." >&2
+    return 1
+  fi
+  if ! xcloud_pid >/dev/null; then
+    avisar "Xbox Cloud" "Abre primero Xbox Cloud desde el lanzador."
+    echo "Xbox Cloud no está abierto." >&2
+    return 1
+  fi
+  # El identificador de una extensión cargada desde una carpeta sale de
+  # su ruta: los primeros 32 dígitos del SHA-256, escritos de la «a» a la «p».
+  id=$(printf %s "$(realpath "$XCLOUD_EXTENSION")" | sha256sum | head -c 32 | tr '0-9a-f' 'a-p')
+  "$nav" "--user-data-dir=$XCLOUD_PERFIL" "--app=chrome-extension://$id/popup.html" >/dev/null 2>&1
+}
+
 # ───────────────── Compañero de juego (segundo monitor) ──────────────
 
 # Las guías de un juego, como JSON [{titulo, url}]. Salen de guias.conf:
@@ -493,8 +608,9 @@ jugar() {
 
   # De vuelta al lanzador, ya con la partida anotada (lo recién jugado
   # queda primero). No con los lanzadores: Steam o Battle.net devuelven el
-  # control apenas abren, y el lanzador les caería encima.
-  if [[ $VOLVER_AL_LANZADOR = si && $fila != lanzadores && -f $ESCENA/shell.qml ]]; then
+  # control apenas abren, y el lanzador les caería encima. Xbox Cloud sí
+  # espera: su orden no termina hasta que se cierra el navegador.
+  if [[ $VOLVER_AL_LANZADOR = si && ($fila != lanzadores || $id = xcloud) && -f $ESCENA/shell.qml ]]; then
     abrir_escena lanzador
   fi
 }
@@ -1079,6 +1195,13 @@ case $accion in
     jugar "$@"
     ;;
   teclado-impacto) teclado_impacto ;;
+  xcloud)
+    case ${2:-abrir} in
+      abrir) xcloud_abrir ;;
+      region) xcloud_region ;;
+      *) echo "Uso: modo-juego xcloud [region]" >&2; exit 2 ;;
+    esac
+    ;;
   companero)
     case ${2:-} in
       alternar | siguiente | anterior | bajar | subir | preguntar)
@@ -1107,7 +1230,7 @@ case $accion in
     abrir_escena salida
     ;;
   *)
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
