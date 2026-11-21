@@ -14,6 +14,10 @@ También suma las ROMs: cada archivo de juego que encuentre en las carpetas
 de ~/.config/modo-juego/roms.conf (una subcarpeta por consola) aparece en
 la fila de juegos y se abre directo con su emulador.
 
+Lo que ya no está no se muestra: si borraste un juego pero quedó su
+acceso en el menú de aplicaciones, la tarjeta desaparece sola («--ver»
+dice cuáles se ocultaron y qué les falta).
+
 Carátulas propias: deja una imagen en ~/.config/modo-juego/caratulas/ con
 el nombre de la entrada (por ejemplo eldenring.jpg) y se usa en la tarjeta.
 """
@@ -194,6 +198,101 @@ def comando_de(exec_, carpeta):
     return cmd
 
 
+# ── ¿Sigue instalado? ────────────────────────────────────────────────
+#
+# Borrar un juego no borra su acceso del menú de aplicaciones, así que el
+# acceso solo no prueba nada: se mira si lo que abre todavía existe.
+
+OCULTOS = []   # (nombre, qué le falta): lo que no se muestra por no estar
+
+
+def bibliotecas_steam():
+    """Carpetas donde Steam instala juegos, o [] si no hay Steam."""
+    vdf = os.path.join(STEAM, "steamapps", "libraryfolders.vdf")
+    try:
+        otras = re.findall(r'"path"\s+"([^"]+)"', open(vdf, encoding="utf-8").read())
+    except OSError:
+        return []
+    return list(dict.fromkeys([STEAM] + otras))
+
+
+def falta_en_script(ruta):
+    """Si «ruta» es un guion de shell de los que se usan para lanzar un
+    juego (define la carpeta, entra y ejecuta), devuelve la carpeta o el
+    ejecutable que ya no existe. Solo mira lo que se entiende sin
+    ejecutar nada: «cd» y «exec» con rutas fijas o variables asignadas
+    ahí mismo. Ante la duda, no dice nada."""
+    try:
+        if os.path.getsize(ruta) > 32768:
+            return ""
+        with open(ruta, "rb") as f:
+            datos = f.read()
+    except OSError:
+        return ""
+    primera = datos.split(b"\n", 1)[0]
+    if not primera.startswith(b"#!") or not re.search(rb"\b(ba|da|z)?sh\b", primera):
+        return ""
+    variables = {"HOME": CASA}
+
+    def expandir(texto):
+        texto = re.sub(r"\$\{(\w+)\}|\$(\w+)",
+                       lambda m: variables.get(m.group(1) or m.group(2), m.group(0)), texto)
+        if texto.startswith("~/"):
+            texto = CASA + texto[1:]
+        return None if "$" in texto or "`" in texto else texto
+
+    for linea in datos.decode("utf-8", "replace").splitlines():
+        linea = linea.strip()
+        m = re.match(r"""^(?:export\s+)?([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|(\S*))$""", linea)
+        if m:
+            valor = m.group(3) if m.group(3) is not None else expandir(m.group(2) or m.group(4) or "")
+            if valor is None:
+                variables.pop(m.group(1), None)
+            else:
+                variables[m.group(1)] = valor
+            continue
+        m = re.match(r"""^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""", linea)
+        if m:
+            destino = expandir(next(g for g in m.groups() if g is not None))
+            if destino and destino.startswith("/") and not os.path.isdir(destino):
+                return destino
+            continue
+        if linea.startswith("exec "):
+            for entre_comillas in re.findall(r'"([^"]+)"', linea):
+                destino = expandir(entre_comillas)
+                if destino and destino.startswith("/") and not os.path.exists(destino):
+                    return destino
+    return ""
+
+
+def falta_del_acceso(exec_, carpeta, appid):
+    """Qué le falta a un acceso para poder abrirse, o "" si está todo."""
+    if carpeta and not os.path.isdir(carpeta):
+        return carpeta
+    try:
+        partes = shlex.split(re.sub(r"%[fFuUdDnNickvm]", "", exec_))
+    except ValueError:
+        return ""
+    while partes and (partes[0] == "env" or re.match(r"^[A-Za-z_]\w*=", partes[0])):
+        partes.pop(0)
+    if not partes:
+        return ""
+    programa = partes[0] if "/" in partes[0] else shutil.which(partes[0])
+    if not programa or not os.path.exists(programa):
+        return partes[0]
+    for argumento in partes[1:]:
+        if argumento.startswith("/") and not os.path.exists(argumento):
+            return argumento
+    # Un acceso directo de Steam a un juego que ya se desinstaló. (Los
+    # números enormes son juegos ajenos a Steam: no tienen manifiesto.)
+    if appid and int(appid) < 2**31:
+        bibliotecas = bibliotecas_steam()
+        if bibliotecas and not any(
+                os.path.exists(os.path.join(b, "steamapps", f"appmanifest_{appid}.acf")) for b in bibliotecas):
+            return f"el juego {appid} en Steam"
+    return falta_en_script(programa)
+
+
 def entradas_desktop():
     porid = {}
     for carpeta in DIRS_APPS:
@@ -231,6 +330,10 @@ def entradas_desktop():
         extra = [f"{CASA}/.local/share/lutris/coverart/{clave}.jpg"]
         de_steam = re.search(r"steam://rungameid/(\d+)", exec_)
         appid = de_steam.group(1) if de_steam else None
+        falta = falta_del_acceso(exec_, d.get("Path", ""), appid)
+        if falta:
+            OCULTOS.append((nombre, falta))
+            continue
         extra += arte_steam(appid, "library_600x900.jpg")
         yield tipo, {
             "id": clave,
@@ -375,15 +478,8 @@ def roms(emuladores):
 
 
 def juegos_steam():
-    raiz = f"{CASA}/.local/share/Steam"
-    vdf = os.path.join(raiz, "steamapps", "libraryfolders.vdf")
-    bibliotecas = [raiz]
-    try:
-        bibliotecas += re.findall(r'"path"\s+"([^"]+)"', open(vdf, encoding="utf-8").read())
-    except OSError:
-        return
     vistos = set()
-    for bib in dict.fromkeys(bibliotecas):
+    for bib in bibliotecas_steam():
         for acf in glob.glob(os.path.join(bib, "steamapps", "appmanifest_*.acf")):
             texto = open(acf, encoding="utf-8", errors="replace").read()
             appid = re.search(r'"appid"\s+"(\d+)"', texto)
@@ -495,6 +591,10 @@ def main():
                 horas = f"  {x['horas']} h" if x.get("horas") else ""
                 consola = f"  ({x['sistema']})" if x.get("sistema") else ""
                 print(f"  {x['nombre']:<32} [{marca}{extras}]{horas}{consola}")
+        if OCULTOS:
+            print(f"no se muestran, ya no están ({len(OCULTOS)}):")
+            for nombre, falta in OCULTOS:
+                print(f"  {nombre:<32} falta {falta}")
 
 
 if __name__ == "__main__":
